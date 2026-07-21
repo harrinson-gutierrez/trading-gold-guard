@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oracle 2.0 — Panel en vivo</title>
+<style>
+  :root{
+    --bg:#0b0e14; --card:#151a23; --line:#232b38; --txt:#e6edf3; --dim:#8b98a9;
+    --green:#2ec46b; --red:#ff5c5c; --amber:#ffb020; --blue:#4c8dff; --accent:#7c5cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;padding:18px;max-width:1100px;margin:0 auto}
+  h1{font-size:18px;font-weight:600;display:flex;align-items:center;gap:10px}
+  .muted{color:var(--dim);font-weight:400}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .sub{color:var(--dim);font-size:12px;margin-top:2px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .card .label{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .card .val{font-size:26px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums}
+  .unit{font-size:13px;color:var(--dim);font-weight:400}
+  .big{grid-column:span 2}
+  .pos{color:var(--green)} .neg{color:var(--red)} .warn{color:var(--amber)}
+  .bar{height:8px;background:var(--line);border-radius:5px;overflow:hidden;margin-top:10px}
+  .bar>i{display:block;height:100%;background:var(--blue);transition:width .4s,background .4s}
+  .section-t{margin:22px 0 4px;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  canvas{width:100%;height:120px;display:block;margin-top:8px}
+  .risk-ok{color:var(--green)} .risk-mid{color:var(--amber)} .risk-hi{color:var(--red)}
+  .foot{margin-top:18px;color:var(--dim);font-size:11px}
+  .stale{color:var(--red);font-weight:600}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th{text-align:left;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:6px 10px;border-bottom:1px solid var(--line)}
+  td{padding:7px 10px;border-bottom:1px solid var(--line);font-size:13px}
+  tbody tr:last-child td{border-bottom:none}
+  .tag{padding:1px 7px;border-radius:5px;font-size:11px;font-weight:600}
+  .tag-buy{background:rgba(46,196,107,.15);color:var(--green)}
+  .tag-sell{background:rgba(255,92,92,.15);color:var(--red)}
+</style>
+</head>
+<body>
+  <h1><span class="dot" id="live"></span> Oracle 2.0 <span class="muted">· XAUUSDm demo 73114636</span></h1>
+  <div class="sub" id="clock">esperando datos…</div>
+
+  <div class="grid">
+    <div class="card big">
+      <div class="label">Net USD (balance − 4000)</div>
+      <div class="val" id="net">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Equity</div>
+      <div class="val" id="equity">—</div>
+    </div>
+    <div class="card">
+      <div class="label">P/L flotante</div>
+      <div class="val" id="float">—</div>
+    </div>
+  </div>
+
+  <div class="section-t">Actividad · cuántas operaciones hace</div>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Operaciones cerradas</div>
+      <div class="val" id="closed">—</div>
+      <div class="sub" id="wl">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Cerradas hoy</div>
+      <div class="val" id="today">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Win rate</div>
+      <div class="val" id="winrate">—</div>
+      <div class="bar"><i id="wrbar" style="width:0%"></i></div>
+    </div>
+    <div class="card">
+      <div class="label">P/L realizado</div>
+      <div class="val" id="realized">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Prom. ganada / perdida</div>
+      <div class="val" id="avgwl">—</div>
+      <div class="sub" id="ratio">—</div>
+    </div>
+    <div class="card">
+      <div class="label">En vivo ahora</div>
+      <div class="val" id="live_now">—</div>
+    </div>
+  </div>
+
+  <div class="section-t">Riesgo del grid (lo que mata al martingala)</div>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Profundidad grid</div>
+      <div class="val" id="depth">—</div>
+      <div class="bar"><i id="depthbar" style="width:0%"></i></div>
+    </div>
+    <div class="card">
+      <div class="label">Lote total abierto</div>
+      <div class="val" id="lots">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Peor posición</div>
+      <div class="val neg" id="worst">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Nivel de margen</div>
+      <div class="val" id="marginlvl">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Drawdown desde pico</div>
+      <div class="val" id="dd">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Dirección</div>
+      <div class="val" id="dir">—</div>
+    </div>
+  </div>
+
+  <div class="section-t">Operaciones en curso <span class="muted" id="open-count"></span></div>
+  <div class="card" style="overflow-x:auto">
+    <table id="open"><thead><tr>
+      <th>#</th><th>Abierta (GMT)</th><th>Tipo</th><th>Lotes</th><th>Tiempo vivo</th><th>P/L flotante</th>
+    </tr></thead><tbody id="open-body">
+      <tr><td colspan="6" class="muted">esperando datos…</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="section-t">Últimas operaciones (cerradas)</div>
+  <div class="card" style="overflow-x:auto">
+    <table id="recent"><thead><tr>
+      <th>#</th><th>Hora cierre (GMT)</th><th>Tipo</th><th>Lotes</th><th>Duró</th><th>P/L</th>
+    </tr></thead><tbody id="recent-body">
+      <tr><td colspan="6" class="muted">esperando datos…</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="section-t">Equity (últimas lecturas)</div>
+  <div class="card"><canvas id="chart" width="1000" height="120"></canvas></div>
+
+  <div class="foot" id="foot"></div>
+
+<script>
+const START_BAL = 4000;
+const HIST_KEY = 'oracle_hist_v1';      // localStorage key for the equity series
+const HIST_WINDOW_MS = 24*60*60*1000;   // keep the last 24h of readings
+
+// hist survives reloads and terminal restarts via localStorage.
+// Each item is {t: <reader ts string>, e: <equity>}.
+let hist = loadHist();
+let lastTs = null, staleCount = 0;
+const $ = id => document.getElementById(id);
+const money = (v,dec=2) => (v>=0?'+':'') + v.toFixed(dec);
+
+function loadHist(){
+  try{
+    const raw = localStorage.getItem(HIST_KEY);
+    if(!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  }catch(e){ return []; }
+}
+function saveHist(){
+  try{ localStorage.setItem(HIST_KEY, JSON.stringify(hist)); }catch(e){}
+}
+// append a reading only if its reader-timestamp is new (no dup points
+// while the terminal is paused), then prune anything older than the window.
+function pushReading(ts, equity){
+  if(hist.length && hist[hist.length-1].t === ts) return; // same reading, skip
+  hist.push({t: ts, e: equity});
+  const cutoff = Date.now() - HIST_WINDOW_MS;
+  // ts is "YYYY.MM.DD HH:MM:SS"; parse to epoch for pruning
+  while(hist.length > 1){
+    const p = Date.parse(hist[0].t.replace(/\./g,'-').replace(' ','T'));
+    if(!isNaN(p) && p < cutoff) hist.shift(); else break;
+  }
+  if(hist.length > 5000) hist.shift(); // hard safety cap
+  saveHist();
+}
+
+// helper: set a value node with a numeric main text + a styled unit span (no innerHTML)
+function setVal(id, mainText, unitText, cls){
+  const el = $(id);
+  el.textContent = '';
+  el.appendChild(document.createTextNode(mainText));
+  if(unitText){
+    const u = document.createElement('span');
+    u.className = 'unit';
+    u.textContent = ' ' + unitText;
+    el.appendChild(u);
+  }
+  el.className = 'val' + (cls ? ' ' + cls : '');
+}
+
+// build a <td> with a BUY/SELL colored tag
+function tagCell(type){
+  const td=document.createElement('td');
+  const s=document.createElement('span');
+  s.className='tag '+(type==='BUY'?'tag-buy':'tag-sell');
+  s.textContent=type; td.appendChild(s);
+  return td;
+}
+function txtCell(text, cls){
+  const td=document.createElement('td'); td.textContent=text;
+  if(cls) td.className=cls; return td;
+}
+function emptyRow(tbody, cols, msg){
+  const tr=document.createElement('tr'), td=document.createElement('td');
+  td.colSpan=cols; td.className='muted'; td.textContent=msg;
+  tr.appendChild(td); tbody.appendChild(tr);
+}
+
+// positions open right now (in progress) — newest first
+function renderOpen(list){
+  const tb=$('open-body'); tb.textContent='';
+  $('open-count').textContent = list.length ? '· '+list.length+' abierta'+(list.length>1?'s':'') : '';
+  if(!list.length){ emptyRow(tb,6,'sin posiciones abiertas'); return; }
+  list.forEach((t,i)=>{
+    const tr=document.createElement('tr');
+    tr.appendChild(txtCell(String(i+1)));
+    tr.appendChild(txtCell(t.open));
+    tr.appendChild(tagCell(t.type));
+    tr.appendChild(txtCell(t.lots.toFixed(2)));
+    tr.appendChild(txtCell(t.age, t.age_s>=120?'warn':''));  // >2min viva = ojo
+    tr.appendChild(txtCell((t.pl>=0?'+':'')+t.pl.toFixed(2), t.pl>=0?'pos':'neg'));
+    tb.appendChild(tr);
+  });
+}
+
+// closed trades — most recent first, with how long each lived
+function renderRecent(list){
+  const tb=$('recent-body'); tb.textContent='';
+  if(!list.length){ emptyRow(tb,6,'sin operaciones cerradas todavía'); return; }
+  list.forEach((t,i)=>{
+    const tr=document.createElement('tr');
+    tr.appendChild(txtCell(String(i+1)));
+    tr.appendChild(txtCell(t.close));
+    tr.appendChild(tagCell(t.type));
+    tr.appendChild(txtCell(t.lots.toFixed(2)));
+    tr.appendChild(txtCell(t.dur ?? '—'));
+    tr.appendChild(txtCell((t.pl>=0?'+':'')+t.pl.toFixed(2), t.pl>=0?'pos':'neg'));
+    tb.appendChild(tr);
+  });
+}
+
+async function tick(){
+  try{
+    const r = await fetch('oracle_status.json?_='+Date.now(), {cache:'no-store'});
+    if(!r.ok) throw new Error('http '+r.status);
+    const d = await r.json();
+
+    if(d.ts === lastTs){ staleCount++; } else { staleCount=0; lastTs=d.ts; }
+    const stale = staleCount > 3;
+    $('live').style.background = stale ? 'var(--red)' : 'var(--green)';
+    $('live').style.boxShadow = '0 0 10px ' + (stale?'var(--red)':'var(--green)');
+
+    const clock = $('clock'); clock.textContent = '';
+    if(stale){ const s=document.createElement('span'); s.className='stale'; s.textContent='TERMINAL PARADO · '; clock.appendChild(s); }
+    clock.appendChild(document.createTextNode('GMT '+d.gmt+' · bid '+d.bid.toFixed(3)));
+
+    const net = d.balance - START_BAL;
+    setVal('net', money(net), '$', net>=0?'pos':'neg');
+    setVal('equity', d.equity.toFixed(2), '$');
+    setVal('float', money(d.floating_pl), '$', d.floating_pl>=0?'pos':'neg');
+
+    // --- Actividad: cuántas operaciones hace ---
+    const closed = d.closed_trades ?? 0;
+    $('closed').textContent = closed;
+    $('wl').textContent = (d.wins ?? 0)+' ganadas · '+(d.losses ?? 0)+' perdidas';
+
+    $('today').textContent = d.closed_today ?? 0;
+
+    const wr = d.win_rate_pct ?? 0;
+    setVal('winrate', closed>0 ? wr.toFixed(0) : '—', closed>0?'%':'', wr>=50?'pos':wr>0?'warn':'');
+    $('wrbar').style.width = Math.min(100, wr)+'%';
+    $('wrbar').style.background = wr>=50?'var(--green)':wr>=30?'var(--amber)':'var(--red)';
+
+    const rp = d.realized_pl ?? 0;
+    setVal('realized', money(rp), '$', rp>=0?'pos':'neg');
+
+    const aw = d.avg_win ?? 0, al = d.avg_loss ?? 0;
+    $('avgwl').textContent = '+'+aw.toFixed(2)+' / '+al.toFixed(2);
+    // ratio ganancia media / pérdida media (>1 = las ganancias pesan más)
+    const ratio = (al!==0) ? (aw / Math.abs(al)) : 0;
+    const rt = $('ratio'); rt.textContent = ratio>0 ? ('ratio '+ratio.toFixed(2)+(ratio>=1?' ✓':' ⚠')) : 'sin datos';
+    rt.className = 'sub ' + (ratio>=1?'pos':ratio>0?'neg':'');
+
+    const ln = $('live_now'); ln.className='val';
+    if(d.open_positions>0){ ln.textContent = d.open_positions+' abierta'+(d.open_positions>1?'s':''); ln.className='val warn'; }
+    else { ln.textContent = 'sin posición'; }
+
+    $('depth').textContent = d.grid_depth;
+    $('depthbar').style.width = Math.min(100, d.grid_depth/15*100)+'%';
+    $('depthbar').style.background = d.grid_depth>=10?'var(--red)':d.grid_depth>=5?'var(--amber)':'var(--blue)';
+
+    $('lots').textContent = d.total_lots.toFixed(2);
+    setVal('worst', money(d.worst_pos_pl), '$', 'neg');
+
+    const ml = d.margin_level_pct;
+    setVal('marginlvl', ml>0?ml.toFixed(0):'∞', '%', (ml>0&&ml<300)?'risk-hi':(ml>0&&ml<800)?'risk-mid':'risk-ok');
+
+    setVal('dd', '-'+d.dd_money.toFixed(2), '$ ('+d.dd_pct.toFixed(2)+'%)', d.dd_pct>2?'neg':d.dd_pct>1?'warn':'');
+
+    const dir=$('dir'); dir.textContent=''; dir.className='val';
+    if(d.sells>0&&d.buys>0){ dir.textContent='⇅ hedge'; }
+    else if(d.sells>0){ dir.textContent='▼ SELL'; dir.className='val neg'; }
+    else if(d.buys>0){ dir.textContent='▲ BUY'; dir.className='val pos'; }
+    else { dir.textContent='— flat'; }
+
+    renderOpen(d.open_trades || []);
+    renderRecent(d.recent_trades || []);
+
+    pushReading(d.ts, d.equity);
+    drawChart();
+
+    $('foot').textContent = 'Actualiza cada 3s · '+hist.length+' lecturas (guardadas 24h) · fuente: MQL4\\Files\\oracle_status.json';
+  }catch(e){
+    const clock=$('clock'); clock.textContent='';
+    const s=document.createElement('span'); s.className='stale';
+    s.textContent='Sin JSON ('+e.message+') — abre este panel desde MQL4\\Files\\ (junto al JSON)';
+    clock.appendChild(s);
+    $('live').style.background='var(--red)';
+  }
+}
+
+function drawChart(){
+  const c=$('chart'), ctx=c.getContext('2d');
+  const W=c.width, H=c.height; ctx.clearRect(0,0,W,H);
+  if(hist.length<2) return;
+  const vals = hist.map(p=>p.e);
+  const min=Math.min(...vals), max=Math.max(...vals), rng=(max-min)||1;
+  const x=i=>i/(hist.length-1)*(W-8)+4;
+  const y=v=>H-8-((v-min)/rng)*(H-16);
+  ctx.strokeStyle='#2a3444'; ctx.setLineDash([4,4]); ctx.beginPath();
+  ctx.moveTo(0,y(START_BAL)); ctx.lineTo(W,y(START_BAL)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle=vals[vals.length-1]>=START_BAL?'#2ec46b':'#ff5c5c';
+  ctx.lineWidth=2; ctx.beginPath();
+  vals.forEach((v,i)=> i?ctx.lineTo(x(i),y(v)):ctx.moveTo(x(i),y(v)));
+  ctx.stroke();
+}
+
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>
