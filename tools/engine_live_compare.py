@@ -369,6 +369,62 @@ def report(sum5, sum4, agree, baskets5, baskets4):
     return "\n".join(out)
 
 
+def deep_report(tag, baskets, samples):
+    """The questions the summary table does not answer: what each ENGINE (magic)
+    did on its own - they are two independent ladders, A only buys and B only
+    sells - and whether a basket that goes deep actually comes back. Recovery is
+    the whole thesis of a no-net grid: if deep baskets recover, the design works;
+    if they only recover when shallow, the tail is where the account dies."""
+    out = ["", "-" * 74, "  POR HILO (engine/magic) - %s" % tag, "-" * 74,
+           f"{'magic':>7}{'lado':>6}{'cest':>6}{'niv':>6}{'add pips':>10}"
+           f"{'W/L':>8}{'ratio':>7}{'peor':>9}{'P/L':>9}"]
+    by_magic = defaultdict(list)
+    for b in baskets:
+        by_magic[b["magic"]].append(b)
+    for magic in sorted(by_magic):
+        bs = by_magic[magic]
+        closed = [b for b in bs if b["duration_s"] is not None]
+        wins = [b["floating_last"] for b in closed if b["floating_last"] > 0]
+        loss = [b["floating_last"] for b in closed if b["floating_last"] <= 0]
+        adds = [a for b in bs for a in b["adds_pips"]]
+        sides = sorted({s for b in bs for s in b["sides"]})
+        ratio = abs(mean(wins) / mean(loss)) if wins and loss else None
+        out.append(f"{magic:>7}{'/'.join(sides):>6}{len(bs):>6}"
+                   f"{sum(b['n_levels'] for b in bs):>6}"
+                   f"{fmt(median(adds) if adds else None, 1):>10}"
+                   f"{('%d/%d' % (len(wins), len(loss))):>8}{fmt(ratio, 2):>7}"
+                   f"{fmt(min((b['floating_min'] for b in bs), default=0)):>9}"
+                   f"{fmt(sum(b['floating_last'] for b in closed)):>9}")
+
+    # Recovery: does a basket that dug a hole climb out of it?
+    out += ["", "-" * 74, "  RECUPERACION - %s (canastas cerradas por profundidad del hoyo)" % tag,
+            "-" * 74,
+            f"{'hoyo maximo':>16}{'cestas':>8}{'recuperaron':>13}{'% exito':>10}{'P/L medio':>12}{'dur mediana':>13}"]
+    bands = [(0, -2, "hasta -$2"), (-2, -8, "-$2 a -$8"), (-8, -20, "-$8 a -$20"),
+             (-20, -50, "-$20 a -$50"), (-50, -1e9, "peor de -$50")]
+    closed = [b for b in baskets if b["duration_s"] is not None]
+    for hi, lo, label in bands:
+        band = [b for b in closed if lo < b["floating_min"] <= hi]
+        if not band:
+            continue
+        rec = [b for b in band if b["floating_last"] > 0]
+        out.append(f"{label:>16}{len(band):>8}{len(rec):>13}"
+                   f"{fmt(100.0 * len(rec) / len(band), 0):>10}"
+                   f"{fmt(mean([b['floating_last'] for b in band])):>12}"
+                   f"{fmt(median([b['duration_s'] for b in band]), 0):>13}")
+    return "\n".join(out)
+
+
+def side_time(samples):
+    """Share of seconds spent BUY-only / SELL-only / hedged / flat."""
+    n = len(samples) or 1
+    c = {"BUY": 0, "SELL": 0, "MIX": 0, "FLAT": 0}
+    for ts in samples:
+        s = _side(samples[ts]["positions"])
+        c[s if s else "FLAT"] += 1
+    return {k: 100.0 * v / n for k, v in c.items()}
+
+
 def _ratio(s):
     if not s.get("avg_win") or not s.get("avg_loss"):
         return None
@@ -385,6 +441,7 @@ def main():
     ap.add_argument("--pip-points", type=float, default=10,
                     help="points per pip (10 on 3/5-digit symbols) - used to convert spread_pts")
     ap.add_argument("--json")
+    ap.add_argument("--deep", action="store_true", help="per-engine + recovery + side-time breakdown")
     a = ap.parse_args()
 
     start = datetime.strptime(a.start, TS_FMT) if a.start else None
@@ -399,6 +456,16 @@ def main():
     agree = direction_agreement(s5, s4)
 
     print(report(sum5, sum4, agree, b5, b4))
+    if a.deep:
+        t5, t4 = side_time(s5), side_time(s4)
+        print("-" * 74)
+        print("  REPARTO DE TIEMPO POR LADO (% de segundos)")
+        print("-" * 74)
+        print("%-14s%14s%14s%14s%14s" % ("", "solo BUY", "solo SELL", "ambos lados", "plano"))
+        for nm, t in (("CERBERUS MT5", t5), ("ORACLE MT4", t4)):
+            print("%-14s%14.1f%14.1f%14.1f%14.1f" % (nm, t["BUY"], t["SELL"], t["MIX"], t["FLAT"]))
+        print(deep_report("CERBERUS MT5", b5, s5))
+        print(deep_report("ORACLE MT4", b4, s4))
 
     if a.json:
         with open(a.json, "w", encoding="utf-8") as fh:
