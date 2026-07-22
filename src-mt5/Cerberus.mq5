@@ -29,7 +29,7 @@
 //| PipSizeOverride=0.1 so a "pip" stays $0.10 (rule A guardian).     |
 //+------------------------------------------------------------------+
 #property copyright "Harrinson Gutierrez"
-#property version   "1.15"
+#property version   "1.16"
 
 #include <Trade\Trade.mqh>
 
@@ -730,7 +730,7 @@ int OnInit()
    EventSetTimer(5);
    string symList = "";
    for (int i = 0; i < ArraySize(g_oSym); i++) symList += (i > 0 ? "," : "") + g_oSym[i];
-   LogAction("INIT", StringFormat("Cerberus v1.15 watching=%s currencies=%s window=-%d/+%d oracle=%s on [%s] (EMA%d %s, effective TP%.0f grid%.0f lot%.2f factor%.1f maxlot%.0f, engines %s%s)",
+   LogAction("INIT", StringFormat("Cerberus v1.16 watching=%s currencies=%s window=-%d/+%d oracle=%s on [%s] (EMA%d %s, effective TP%.0f grid%.0f lot%.2f factor%.1f maxlot%.0f, engines %s%s)",
              PairsToWatch, JoinCurrencies(), MinutesBefore, MinutesAfter,
              OracleOn() ? "ON" : "OFF", symList, Oracle_MaPeriod, EnumToString(Oracle_TF),
              EffTP(), EffGrid(), EffLot(), EffFactor(), Oracle_MaxLot,
@@ -1883,7 +1883,7 @@ void WriteStatusFile()
    bool  mktOpen  = (primary == "") ? true : MarketOpen(primary);
    int   mktClose = (primary == "") ? -1  : MinutesToSessionClose(primary);
    string json = StringFormat(
-      "{\"ea\":\"Cerberus\",\"version\":\"1.15\",\"gmt\":\"%s\",\"status\":\"%s\",\"hour\":{\"risk\":\"%s\",\"blocked\":%s,\"change_min\":%d,\"sched_blocked\":%s},\"market\":{\"symbol\":\"%s\",\"open\":%s,\"close_in_min\":%d},\"config\":{\"symbol\":\"%s\",\"tp\":%.0f,\"grid\":%.0f,\"lot\":%.2f,\"factor\":%.2f,\"maxlev\":%d},\"basket_stop\":{\"usd\":%.0f,\"hits_today\":%d},\"regime_blocked\":%s,\"autotrading\":%s,\"feed\":\"%s\",\"events_loaded\":%d,\"balance\":%.2f,\"equity\":%.2f,\"free_margin\":%.2f,\"margin_level\":%.1f,\"positions_pl\":%.2f,\"closed_trades\":%d,\"wins\":%d,\"losses\":%d,\"win_rate_pct\":%.1f,\"realized_pl\":%.2f,\"closed_today\":%d,\"avg_win\":%.2f,\"avg_loss\":%.2f,\"peak_equity\":%.2f,\"dd_money\":%.2f,\"dd_pct\":%.2f,\"heads\":{\"oracle\":\"%s\",\"baskets\":[%s],\"cycles\":%d,\"realized\":%.2f},\"positions\":[%s],\"recent_trades\":[%s],\"next_event\":%s,\"last_action\":\"%s\"}",
+      "{\"ea\":\"Cerberus\",\"version\":\"1.16\",\"gmt\":\"%s\",\"status\":\"%s\",\"hour\":{\"risk\":\"%s\",\"blocked\":%s,\"change_min\":%d,\"sched_blocked\":%s},\"market\":{\"symbol\":\"%s\",\"open\":%s,\"close_in_min\":%d},\"config\":{\"symbol\":\"%s\",\"tp\":%.0f,\"grid\":%.0f,\"lot\":%.2f,\"factor\":%.2f,\"maxlev\":%d},\"basket_stop\":{\"usd\":%.0f,\"hits_today\":%d},\"regime_blocked\":%s,\"autotrading\":%s,\"feed\":\"%s\",\"events_loaded\":%d,\"balance\":%.2f,\"equity\":%.2f,\"free_margin\":%.2f,\"margin_level\":%.1f,\"positions_pl\":%.2f,\"closed_trades\":%d,\"wins\":%d,\"losses\":%d,\"win_rate_pct\":%.1f,\"realized_pl\":%.2f,\"closed_today\":%d,\"avg_win\":%.2f,\"avg_loss\":%.2f,\"peak_equity\":%.2f,\"dd_money\":%.2f,\"dd_pct\":%.2f,\"heads\":{\"oracle\":\"%s\",\"baskets\":[%s],\"cycles\":%d,\"realized\":%.2f},\"positions\":[%s],\"recent_trades\":[%s],\"next_event\":%s,\"last_action\":\"%s\"}",
       TimeToString(nowG, TIME_DATE | TIME_SECONDS), status,
       RiskName(HourRisk(hm)), HourBlocked() ? "true" : "false", MinutesToRiskChange(),
       SchedBlocked() ? "true" : "false",
@@ -2464,7 +2464,16 @@ void Oracle_SetBasketTP(string sym, int magic)
 // verdict does not flicker intrabar. Fails open on any handle/buffer problem.
 bool Oracle_RegimeBlocked(int dirSig)
 {
-   if (!Oracle_UseRegimeFilter || dirSig == 0) return false;
+   if (!Oracle_UseRegimeFilter)
+   {
+      // Filter off: clear the cache. Without this the status JSON keeps
+      // publishing the last verdict from before it was switched off - observed
+      // live on the MT4 twin (2026-07-22): regime_blocked stayed true for
+      // minutes after the filter was disabled, reading as an active veto.
+      g_regimeBlocked = false;
+      return false;
+   }
+   if (dirSig == 0) return false;   // no signal this pass: leave the last verdict as it was
    double adx = IndValueBuf(g_oADX, 0, 1);
    double dip = IndValueBuf(g_oADX, 1, 1);
    double dim = IndValueBuf(g_oADX, 2, 1);

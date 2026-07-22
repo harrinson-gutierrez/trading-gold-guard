@@ -21,7 +21,7 @@
 //| https://nfs.faireconomy.media whitelisted (Options->Experts).    |
 //+------------------------------------------------------------------+
 #property copyright "Harrinson Gutierrez"
-#property version   "1.15"
+#property version   "1.16"
 #property strict
 
 #import "user32.dll"
@@ -142,6 +142,9 @@ datetime g_lastAddTime[2];       // GMT of the last level opened per engine (add
 datetime g_openedAt = 0;         // last closed->open transition (warm-up)
 bool     g_sawClosed = false;
 datetime g_lastM1Bar = 0;        // last M1 bar the ATR spike/window rule was evaluated on (rule C runs once per CLOSED bar, like MT5)
+bool     g_regimeBlocked = false; // last regime-veto verdict, for the status JSON and the panel (homologated to MT5's g_regimeBlocked)
+datetime g_regimeEvalAt  = 0;     // GMT of the last regime evaluation. The verdict is only refreshed when the entry gate reaches it, so an earlier gate (hour filter, pause, market closed) leaves it STALE - the panel shows the age so a stale "clear" cannot be mistaken for a live one
+int      g_regimeDir     = 0;     // signal direction that last verdict referred to (+1 BUY / -1 SELL)
 bool     g_wasInWindow = false;  // news: were we inside a news window on the previous pass
 string   g_activeEventName = ""; // news: name of the event currently pausing us
 int      g_bstopHitsToday = 0;
@@ -725,15 +728,28 @@ bool SchedBlocked()
 // Regime filter: veto entries/adds against a strong H1 trend (soft, fail-open).
 bool RegimeBlocked(int dir)
 {
-   if (!Oracle_UseRegimeFilter || dir == 0) return false;
-   double adx = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MAIN, 1);
-   if (adx > Oracle_RegimeADX)
+   if (!Oracle_UseRegimeFilter)
    {
-      double dip = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_PLUSDI, 1);
-      double dim = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MINUSDI, 1);
-      if (dir > 0 && dim > dip) return true;   // buying against a strong downtrend
-      if (dir < 0 && dip > dim) return true;   // selling against a strong uptrend
+      // Filter off: clear the cache. Without this the status JSON keeps
+      // publishing the last verdict from before it was switched off (seen live
+      // 2026-07-22: blocked=true with eval_age_s climbing past 450 s), which
+      // reads as an active veto that no longer exists.
+      g_regimeBlocked = false;
+      g_regimeEvalAt  = 0;
+      g_regimeDir     = 0;
+      return false;
    }
+   if (dir == 0) return false;   // no signal this pass: leave the last verdict as it was
+   // Both conditions are evaluated on every pass (the old code returned early on
+   // the ADX one). The verdict is identical - it is an OR - but this way the
+   // transition log always carries the full picture, like MT5's.
+   double adx = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MAIN,    1);
+   double dip = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_PLUSDI,  1);
+   double dim = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MINUSDI, 1);
+   bool contrary = (adx > Oracle_RegimeADX) && ((dir > 0) ? (dim > dip) : (dip > dim));
+
+   bool   extended = false;
+   double dist = 0;
    if (Oracle_RegimeATRDist > 0)
    {
       double ema = iMA(g_sym, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE, 1);
@@ -741,11 +757,22 @@ bool RegimeBlocked(int dir)
       double px  = MarketInfo(g_sym, MODE_BID);   // live bid, homologated to MT5 (was iClose H1 close): MT5 reads the live bid so the regime veto reacts intrabar, not only at the H1 close
       if (ema > 0 && atr > 0)
       {
-         if (dir > 0 && px < ema - Oracle_RegimeATRDist * atr) return true;   // buying deep under EMA200
-         if (dir < 0 && px > ema + Oracle_RegimeATRDist * atr) return true;   // selling far above EMA200
+         dist = (px - ema) / atr;                                  // signed distance in ATRs
+         extended = (dir > 0) ? (dist <= -Oracle_RegimeATRDist)    // buying deep under EMA200
+                              : (dist >=  Oracle_RegimeATRDist);   // selling far above EMA200
       }
    }
-   return false;
+
+   bool blocked = contrary || extended;
+   g_regimeEvalAt = TimeGMT();
+   g_regimeDir    = dir;
+   if (blocked != g_regimeBlocked)   // log the transition only, like the hour filter
+   {
+      g_regimeBlocked = blocked;
+      LogAction("REGIME_BLOCK", StringFormat("%s %s for %s: ADX=%.1f DI+=%.1f DI-=%.1f dist=%.2fxATR",
+                g_sym, blocked ? "ON" : "off", (dir > 0 ? "BUY" : "SELL"), adx, dip, dim, dist));
+   }
+   return blocked;
 }
 
 // Effective grid depth cap: hard cap wins; otherwise capital-proportional.
@@ -1353,11 +1380,20 @@ void WriteStatus()
    if (TimeGMT() - g_lastStatus < 30) return;
    g_lastStatus = TimeGMT();
    string s = "{";
-   s += "\"ea\":\"Cerberus4\",\"version\":\"1.15\",";
+   s += "\"ea\":\"Cerberus4\",\"version\":\"1.16\",";
    s += "\"gmt\":\"" + TimeToString(TimeGMT(), TIME_DATE | TIME_SECONDS) + "\",";
    s += "\"status\":\"" + (g_paused ? "PAUSED_MANUAL" : (TimeGMT() < g_volPauseUntil ? "PAUSED_VOLATILITY" : (InNewsWindow() ? "PAUSED_NEWS" : "RUNNING"))) + "\",";
    s += StringFormat("\"config\":{\"symbol\":\"%s\",\"tp\":%.0f,\"grid\":%.0f,\"lot\":%.2f,\"maxlev\":%d},", g_sym, EffTP(), EffGrid(), EffLot(), EffMaxLev());
    s += StringFormat("\"basket_stop\":{\"usd\":%.0f,\"hits_today\":%d},", EffBstop(), g_bstopHitsToday);
+   // "regime_blocked" is the flat field MT5 publishes - kept identical so the
+   // compare panel can read both terminals with one parser. The "regime" object
+   // is the extra MT4 needs: eval_age_s exposes a STALE verdict (see g_regimeEvalAt).
+   s += StringFormat("\"regime_blocked\":%s,", g_regimeBlocked ? "true" : "false");
+   s += StringFormat("\"regime\":{\"filter\":%s,\"blocked\":%s,\"eval_age_s\":%d,\"dir\":%d},",
+                     Oracle_UseRegimeFilter ? "true" : "false",
+                     g_regimeBlocked ? "true" : "false",
+                     (g_regimeEvalAt > 0) ? (int)(TimeGMT() - g_regimeEvalAt) : -1,
+                     g_regimeDir);
    s += "\"feed\":\"" + (FeedOk ? "OK" : "disk cache") + "\",";
    s += StringFormat("\"events_loaded\":%d,", g_eventsLoaded);
    double eq = AccountEquity();
@@ -1574,6 +1610,21 @@ void PanelUpdate()
               Oracle_EngineA ? "A" : "-", Oracle_EngineB ? "B" : "-"),
               g_oracleOn ? clrLightGreen : cDim);
 
+      // Regime-filter state. Until this line existed there was NO way from MT4 to
+      // tell a filter that never fires from one blocking half the day. The age is
+      // shown because the verdict only refreshes when the entry gate reaches it.
+      if (!Oracle_UseRegimeFilter)
+         SetLine(line++, "REGIME H1: filter OFF", cDim);
+      else if (g_regimeEvalAt == 0)
+         SetLine(line++, StringFormat("REGIME H1: ON (ADX>%d, %.0fxATR) - not evaluated yet",
+                 Oracle_RegimeADX, Oracle_RegimeATRDist), cDim);
+      else
+         SetLine(line++, StringFormat("REGIME H1: %s for %s (%ds ago, ADX>%d or %.0fxATR)",
+                 g_regimeBlocked ? ">> BLOCKING entries" : "clear",
+                 (g_regimeDir > 0) ? "BUY" : "SELL",
+                 (int)(TimeGMT() - g_regimeEvalAt), Oracle_RegimeADX, Oracle_RegimeATRDist),
+                 g_regimeBlocked ? clrTomato : clrLightGreen);
+
       double exposure = 0;
       double pip = StratPip(g_sym);
       double sbid = MarketInfo(g_sym, MODE_BID);
@@ -1728,7 +1779,7 @@ int OnInit()
 
    PanelCreate();
    EventSetTimer(5);
-   LogAction("INIT", StringFormat("Cerberus4 v1.15 on [%s] (%s%d + HILO%d tf%d, effective %s, engines %s%s)",
+   LogAction("INIT", StringFormat("Cerberus4 v1.16 on [%s] (%s%d + HILO%d tf%d, effective %s, engines %s%s)",
              g_sym, (Oracle_MaMethod == 1) ? "EMA" : "SMA", Oracle_MaPeriod, Oracle_HILOPeriod,
              (Oracle_TF > 0) ? Oracle_TF : 1, ConfigLine(),
              Oracle_EngineA ? "A" : "-", Oracle_EngineB ? "B" : "-"));
