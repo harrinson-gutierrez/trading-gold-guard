@@ -50,6 +50,7 @@ A faithful replica of the Oracle 2.0 bot, with the risk net it lacked.
 - **Exit**: one shared server-side TP for the whole basket, `TP` pips from the weighted average, re-anchored on every add.
 - **Depth cap**: `Oracle_MaxGridLevels`, or a capital-proportional cap (`Oracle_BaseCapital` / `Oracle_DollarsPerLevel`) so the risk scales with the declared balance instead of relying on a cushion.
 - **Basket stop**: `Oracle_BasketStopUSD` cuts a basket at −N USD floating, with a cooldown before re-arming. `Oracle_UseServerSL` mirrors it as a broker-side SL per position, so it still executes if our close orders get rejected.
+  > ⚠️ **`Oracle_BasketStopUSD = 0` disables the broker-side SL too.** The SL is attached only when the basket stop is armed (`Oracle_UseServerSL && EffBstop() > 0`), so running with the stop off leaves **every** defense client-side. Measured 2026-07-22: the broker disabled algo trading (retcode 10026) during a $27/hour move in gold; rules A and E fired and all 191 close attempts were rejected, while the positions carried `sl=0.000`. Keep it above zero in live use.
 - **New-basket EMA gate** (`Oracle_NewBasketNeedsEMA`): the HiLo always carries a side, so without this gate Cerberus re-arms a basket the second it closes one. Hot-switchable with `EMAGATE ON|OFF`.
 
 ## Configuration: inputs, overrides, presets
@@ -82,7 +83,7 @@ current stop untouched.
 **Production preset, identical on both platforms** ([config/symbol_presets.txt](config/symbol_presets.txt)):
 
 ```
-XAUUSDm=15,30,0.01,1.00,0,0
+XAUUSDm=15,30,0.01,1.00,0,120
 ```
 
 | Field | Value | Meaning |
@@ -92,7 +93,7 @@ XAUUSDm=15,30,0.01,1.00,0,0
 | `LOT` | 0.01 | Fixed lot per level |
 | `FACTOR` | 1.00 | Additive grid (no lot multiplication) |
 | `MAXLEV` | 0 | No hard depth cap → the capital-proportional cap applies |
-| `BSTOP` | 0 | Basket stop off in the file (raise it live with `BSTOP <usd>`) |
+| `BSTOP` | 120 | Basket stop in USD. **Do not set 0 in live use** — it also removes the broker-side SL (see above). Tunable live with `BSTOP <usd>` |
 
 On XAUUSDm a strategy pip is `Point*10` = **$0.01**, so `TP=15` is a 15-cent move and
 `GRID=30` a 30-cent step.
