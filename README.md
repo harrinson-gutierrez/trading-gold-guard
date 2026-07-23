@@ -6,7 +6,44 @@ strategy that trades it. It ships as two builds kept in lockstep — MQL5 and MQ
 sharing the same inputs, the same command channel and the same preset file format.
 
 Current deployment: Exness demo, gold `XAUUSDm`, hedging, 1:200. **Demo soak only** — see
-[Safety model](#safety-model).
+[Risk disclosure](#-risk-disclosure).
+
+## ⚠️ Risk disclosure
+
+**This is a high-risk experimental system. It is not a product, not advice, and not
+validated. Do not run it with money you cannot afford to lose entirely.**
+
+- **It is a grid. The payoff is asymmetric.** Profit per cycle is capped (`TP` = 15 pips on
+  a 0.01 lot), the loss is not. Every adverse level adds exposure while price keeps going
+  the wrong way. A high win rate is a *knob*, not an edge: measured cycles have run at
+  62–97 % wins while the account bled in net USD, because the winners are small and the
+  losers are the whole basket.
+- **It does not protect against market volatility.** The guardian reacts *after* the move
+  starts — it cannot predict gaps, news spikes, or a broker halting execution. On
+  2026-07-22 the broker disabled algo trading (retcode 10026) during a $27/hour move in
+  gold: rules A and E fired and **all 191 close attempts were rejected**. Only the
+  broker-side SL survives that scenario, and only if `Oracle_BasketStopUSD > 0`.
+  Slippage, spread widening, requotes, weekend gaps and rollover halts are all outside
+  the EA's control.
+- **On small accounts the losses are disproportionately large.** The 0.01-lot minimum is a
+  hard floor — the strategy cannot be scaled down below it. The same basket that risks a
+  few percent on $4 000 can be a margin call on $500, and margin exhaustion is the failure
+  mode with no recovery: rule B closes the *worst* position in a loop, which realises the
+  loss instead of avoiding it. The capital-proportional depth cap
+  (`Oracle_BaseCapital` / `Oracle_DollarsPerLevel`) mitigates this but does not remove it.
+- **The outcome depends on time and on how long you stay exposed.** Results are
+  path-dependent, not additive: an open basket held across a session close, a weekend, or a
+  high-impact release does not earn more, it only accumulates the chance of meeting the
+  move that breaks it. Gold and FX close Friday 21:00 UTC until Sunday 22:00 — a grid can
+  hang 49 h and reopen on a gap. Any equity curve shown here is a sample of one path over a
+  short window and says nothing about the next one.
+- **No backtest here has passed validation.** A 65-config sweep plus out-of-sample produced
+  zero configurations meeting PF > 1.2 with DD < 3 %, and the tester systematically
+  overstates small-TP grids. A faithful replica of the reference bot lost **−99.99 %** over
+  a 2.4-year backtest *despite* 97 % winning cycles.
+
+Use it as a study of guarded grid mechanics, an EA skeleton, or a measurement harness. Do
+not use it as a money machine.
 
 | Build | Source | Version | Terminal |
 |---|---|---|---|
@@ -191,5 +228,18 @@ written metrics, and only then by explicit decision. The guardian is the last li
 the strategy — and a win rate is not an edge: measure **net USD** and the
 average-win/average-loss ratio, because a grid that never closes losers can show 63 % wins
 while bleeding.
+
+What the guardian **can** do: cut a position, cut a basket, flatten the account and stop
+the day. What it **cannot** do: predict a move, execute when the broker refuses orders,
+close a gap it was already holding through, or make a negative-expectancy engine positive.
+Read the [Risk disclosure](#-risk-disclosure) before running any of this anywhere.
+
+## Licence and disclaimer
+
+Provided **as is**, with no warranty of any kind, for research and educational use. This
+is not financial advice and not a solicitation to trade. Trading leveraged CFDs on margin
+carries a high risk of losing money rapidly, including more than the initial deposit on
+non-protected accounts. The authors accept no liability for any loss arising from the use
+of this code. You are solely responsible for anything you run on your own account.
 
 Full documentation: **[the wiki](../../wiki)**.
