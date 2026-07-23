@@ -733,14 +733,6 @@ void SetHiloSide(int side)
    GlobalVariableSet(GV_HILO_SIDE, side);
 }
 
-// HiLo-flip cadence gate. Each contiguous stretch where the raw
-// HiLo holds one side is one "epoch"; an engine may arm at most ONE new basket per
-// epoch, so after a basket TPs it does NOT re-arm until the HiLo flips. This is the
-// hypothesis for how Oracle keeps its cadence low with InpOpenOneCandle=false: it
-// waits for a fresh signal edge, it does not re-fire every tick the side is valid.
-int  g_hiloEpoch = 0;               // raw HiLo side of the current epoch (+1/-1, 0=none)
-bool g_armedThisEpoch[2] = {false, false};
-
 // Gann HiLo Activator. Oracle's "HILO Method = Exponential" means the high and low
 // bands are EMAs, not the arithmetic means this port used - an EMA weights the
 // most recent bar far more, so it flips sooner on a turn.
@@ -844,19 +836,12 @@ void OracleOnEngine(int magic)
       if (Engine_A_Sell && Engine_B_Buy) side = EngineSide(magic);
       if (bias == 0 || (side != 0 && bias != side)) return;
 
- // Cadence gate: one new basket per HiLo epoch. A flip of the raw HiLo side
- // (g_prevHiloSide, freshly set by Bias above) opens a new epoch and clears
- // both engines' arm flags; without a flip, a closed basket does NOT re-arm.
-      if (g_prevHiloSide != 0 && g_prevHiloSide != g_hiloEpoch)
-      {
-         g_hiloEpoch = g_prevHiloSide;
-         g_armedThisEpoch[0] = false; g_armedThisEpoch[1] = false;
-      }
-      if (g_armedThisEpoch[ei]) return;   // already armed this epoch, wait for the next flip
-
+      // Re-arm immediately after a close, like Oracle: as long as the fade side is
+      // valid, a closed basket opens the next one on the following tick. Oracle books
+      // many shallow wins this way; gating new baskets on a HiLo flip (tried and
+      // removed) starved the win-booking - measured 28 cycles vs Oracle's ~72.
       if (OpenLevel(sym, magic, bias, 0))
       {
-         g_armedThisEpoch[ei] = true;
          g_lastAddTime[ei] = TimeCurrent();   // throttle the first add too
          SetBasketTP(sym, magic);
       }
@@ -1441,7 +1426,7 @@ int OnInit()
 
    PanelCreate();
    EventSetTimer(5);
-   LogAction("INIT", StringFormat("Cerberus4 v2.00 on [%s] (%s%d/%s + HILO%d/%s tf%d, effective %s, engines %s%s = A:SELL B:BUY, hiloSide %d, new basket on HiLo flip)",
+   LogAction("INIT", StringFormat("Cerberus4 v2.00 on [%s] (%s%d/%s + HILO%d/%s tf%d, effective %s, engines %s%s = A:SELL B:BUY, hiloSide %d, re-arm immediate)",
              g_sym, (MA_Method == 1) ? "EMA" : "SMA", MA_Period,
              (MaPrice() == PRICE_OPEN) ? "open" : "close", HiLo_Period,
              (HiLo_Method == 1) ? "EMA" : "SMA",

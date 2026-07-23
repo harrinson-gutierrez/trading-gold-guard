@@ -13,3 +13,6 @@ ff_calendar_sample.json
 # INSTALL.md and the chart profiles carry account numbers and data-folder paths.
 config/*
 !config/Cerberus_XAUUSDm.set
+
+# working .set files (release set lives in config/)
+src-mt4/*.set
