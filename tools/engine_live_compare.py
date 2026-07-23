@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the Cerberus (MT5) engine against Oracle 2.0 (MT4) from live 1 Hz
+"""Compare the Cerberus engine against Oracle 2.0 from live 1 Hz
 position snapshots written by PosRecorder.mq5 / PosRecorder.mq4.
 
 The golden-master comparator (golden_master_compare.py) diffs Strategy Tester
@@ -335,9 +335,9 @@ def report(sum5, sum4, agree, baskets5, baskets4):
         ("Spread mediano (pts)", "spread_med", 0),
     ]
     out = ["", "=" * 74,
-           f"  CERBERUS (MT5) vs ORACLE 2.0 (MT4) - {sum5.get('first','?')} .. {sum5.get('last','?')} GMT",
+           f"  CERBERUS vs ORACLE 2.0 - {sum5.get('first','?')} .. {sum5.get('last','?')} GMT",
            "=" * 74, "",
-           f"{'metrica':<30}{'CERBERUS MT5':>21}{'ORACLE MT4':>21}"]
+           f"{'metrica':<30}{'CERBERUS':>21}{'ORACLE':>21}"]
     for label, key, nd in rows:
         out.append(f"{label:<30}{fmt(sum5.get(key), nd):>21}{fmt(sum4.get(key), nd):>21}")
 
@@ -349,11 +349,11 @@ def report(sum5, sum4, agree, baskets5, baskets4):
             f"  ambos en mercado     : {agree['both_in_market_s']}",
             f"  mismo lado           : {agree['same_side_s']}  ({fmt(agree['same_side_pct'],1)}%)",
             f"  lados opuestos       : {agree['opposite_side_s']}",
-            f"  solo MT5 en mercado  : {agree['only_mt5_s']}",
-            f"  solo MT4 en mercado  : {agree['only_mt4_s']}",
+            f"  solo Cerberus en mercado  : {agree['only_mt5_s']}",
+            f"  solo Oracle en mercado  : {agree['only_mt4_s']}",
             f"  ambos planos         : {agree['flat_both_s']}", ""]
 
-    for tag, baskets in (("CERBERUS MT5", baskets5), ("ORACLE MT4", baskets4)):
+    for tag, baskets in (("CERBERUS", baskets5), ("ORACLE", baskets4)):
         out += ["-" * 74, f"  CANASTAS {tag}", "-" * 74,
                 f"{'inicio':<10}{'magic':>7}{'lado':>6}{'niv':>4}  {'paso pips':>30}"
                 f"{'dur s':>7}{'peor':>8}{'P/L':>8}"]
@@ -451,8 +451,8 @@ def main():
     s4 = load_samples(a.mt4, start, end)
     b5 = build_baskets(s5, a.pip, a.pip_points)
     b4 = build_baskets(s4, a.pip, a.pip_points)
-    sum5 = summarize("CERBERUS MT5", s5, b5)
-    sum4 = summarize("ORACLE MT4", s4, b4)
+    sum5 = summarize("CERBERUS", s5, b5)
+    sum4 = summarize("ORACLE", s4, b4)
     agree = direction_agreement(s5, s4)
 
     print(report(sum5, sum4, agree, b5, b4))
@@ -462,10 +462,10 @@ def main():
         print("  REPARTO DE TIEMPO POR LADO (% de segundos)")
         print("-" * 74)
         print("%-14s%14s%14s%14s%14s" % ("", "solo BUY", "solo SELL", "ambos lados", "plano"))
-        for nm, t in (("CERBERUS MT5", t5), ("ORACLE MT4", t4)):
+        for nm, t in (("CERBERUS", t5), ("ORACLE", t4)):
             print("%-14s%14.1f%14.1f%14.1f%14.1f" % (nm, t["BUY"], t["SELL"], t["MIX"], t["FLAT"]))
-        print(deep_report("CERBERUS MT5", b5, s5))
-        print(deep_report("ORACLE MT4", b4, s4))
+        print(deep_report("CERBERUS", b5, s5))
+        print(deep_report("ORACLE", b4, s4))
 
     if a.json:
         with open(a.json, "w", encoding="utf-8") as fh:

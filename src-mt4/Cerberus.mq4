@@ -1,27 +1,31 @@
 //+------------------------------------------------------------------+
-//| Cerberus.mq4 - MQL4 port of Cerberus (guardian + ORACLE)         |
-//|                                                                  |
-//| Functional homolog of src-mt5/Cerberus.mq5 for MetaTrader 4.     |
-//| Heads:                                                           |
-//|  GUARDIAN: news windows (ForexFactory JSON with disk cache),     |
-//|    volatility circuit breaker (rule C, per symbol), rules        |
-//|    A (adverse pips) / B (margin) / D (USD per position) /        |
-//|    E (daily loss -> close all + pause until RESUME), command     |
-//|    channel ng_command.txt, status ng_status.json, CSV log.       |
-//|  ORACLE (magics 7799/9977): EMA34 + HILO(3) on M1, additive      |
-//|    grid, shared basket TP re-anchored to the weighted average,   |
-//|    per-basket USD stop with cooldown. With BOTH engines on,      |
-//|    A opens only BUY signals and B only SELL (one ladder per      |
-//|    side, like the original Oracle 2.0); with one engine on it    |
-//|    trades both sides, one basket at a time.                      |
-//|                                                                  |
-//| Pip scale for the strategy: 1 pip = Point*10 (XAUUSDm: $0.01).   |
-//| The guardian's rule A uses PipSizeOverride (XAUUSDm: 0.1).       |
-//| Requires hedging-style MT4 account and the WebRequest URL        |
-//| https://nfs.faireconomy.media whitelisted (Options->Experts).    |
+//| Cerberus.mq4 - MQL4 port of Cerberus (guardian + ORACLE) |
+//| |
+//| v2.0 (2026-07-23): SIMPLIFIED AND ALIGNED TO ORACLE 2.0. |
+//| Removed - every mechanism that CLOSES a position early: |
+//| rule A (adverse pips), rule B (margin level), rule C |
+//| (volatility breaker), rule D (USD per position), the |
+//| close-all on a news window, the Friday pre-close flatten |
+//| and the whole scheduler. Measured 2026-07-23, those forced |
+//| cuts are why avg_loss was -$3.58 against Oracle's -$1.78 |
+//| while WINNING more often (66.5% vs 62%). |
+//| Kept - the two nets the owner chose deliberately: |
+//| rule E (daily loss -> close all + pause until RESUME) and |
+//| an OPTIONAL per-basket USD stop, default OFF like Oracle. |
+//| Display only, never blocking: hour-risk band, weekly-close |
+//| warning. News blocks NEW entries only. |
+//| ORACLE (magics 7799/9977): MA34 on OPEN + Gann HiLo(3) EMA on |
+//| M1, additive grid, shared basket TP re-anchored to the |
+//| weighted average. With BOTH engines on, magic 7799 takes |
+//| SELL and 9977 takes BUY - as MEASURED on Oracle 2.0, which |
+//| is the reverse of its own cosmetic labels. |
+//| |
+//| Pip scale for the strategy: 1 pip = Point*10 (XAUUSDm: $0.01). |
+//| Requires hedging-style MT4 account and the WebRequest URL |
+//| https://nfs.faireconomy.media whitelisted (Options->Experts). |
 //+------------------------------------------------------------------+
 #property copyright "Harrinson Gutierrez"
-#property version   "1.16"
+#property version   "2.00"
 #property strict
 
 #import "user32.dll"
@@ -32,83 +36,56 @@
 #define MT4_CMD_AUTOTRADING 33020
 
 //==================================================================
-// Inputs (names mirror the MT5 build where the feature exists)
+// Inputs - Oracle 2.0 layout: the 9 knobs that get tuned live sit at the top,
+// everything else is grouped behind an `input string` separator (the same
+// pattern Oracle uses: "------Config Grid------"). Rule for labels: the visible
+// text must read like the variable name, in English.
 //==================================================================
-// Full input parity with src-mt5/Cerberus.mq5. Defaults mirror the PRODUCTION
-// values (the Exness .chr), so a fresh attach behaves like the live MT5 build.
-input string PairsToWatch        = "XAUUSDm"; // guardian watches these (CSV)
-input int    MinutesBefore       = 30;     // news window: minutes before High event
-input int    MinutesAfter        = 30;     // news window: minutes after
-input int    FeedRefreshMinutes  = 60;     // calendar refresh period
-input bool   ClosePendingOrders  = true;   // guardian closes also delete pending orders
-input string TestEventMinutes    = "";     // TEST: inject a fake USD event N minutes ahead (or use TEST=N command)
-input string LogFileName         = "Cerberus_log.csv";
-input double MaxAdversePips      = 300.0;  // rule A: close a position this many pips against
-input double RuleA_xATR          = 15.0;   // rule A: ATR-relative variant - threshold is max(MaxAdversePips, N x ATR) (0 = fixed pips only)
-input double PipSizeOverride     = 0.1;    // guardian pip (XAUUSDm 3 digits => 0.1)
-input double MinMarginLevelPct   = 200.0;  // rule B
-input double MaxLossPerTradeUSD  = 60.0;   // rule D
-input double MaxDailyLossUSD     = 200.0;  // rule E: close everything + pause until RESUME
-input double VolSpikeATRmult     = 5.0;    // rule C: M1 candle > N x ATR(20)
-input double VolSpikePips        = 0.0;    // rule C: absolute variant - candle > N pips (0 = off)
-input bool   UseHourFilter       = true;   // hour-risk filter: block entries when HourRisk >= HourBlockRisk
-input int    HourBlockRisk       = 3;      // 3 = only VERY HIGH bands (08:00-09:30, 12:00-15:30 UTC)
-input bool   UseSchedule         = false;  // scheduler: block NEW entries inside the windows below (soft)
-input bool   SchedKillAT         = false;  // HARD mode: entering a window closes ALL orders and turns global AutoTrading OFF
-input string Sched1Start         = "08:00"; // window 1 start (UTC "HH:MM"; start==end disables)
-input string Sched1End           = "09:30";
-input string Sched2Start         = "12:00";
-input string Sched2End           = "15:30";
-input string Sched3Start         = "";
-input string Sched3End           = "";
-input string Sched4Start         = "";
-input string Sched4End           = "";
-input bool   SchedSunday         = true;   // allow new entries on this UTC day
-input bool   SchedMonday         = true;
-input bool   SchedTuesday        = true;
-input bool   SchedWednesday      = true;
-input bool   SchedThursday       = true;
-input bool   SchedFriday         = true;
-input bool   SchedSaturday       = true;
-input int    VolWindowM1Bars     = 5;      // rule C: window bars
-input double VolWindowATRmult    = 8.0;    // rule C: window range > N x ATR
-input int    VolATRPeriod        = 20;
-input int    VolPauseMinutes     = 3;      // rule C pause (renewable)
-input bool   CloseOnVolSpike     = false;  // rule C also closes that symbol's baskets
-input int    SrvBlockBackoffMin  = 10;     // BROKER-rejection backoff (market closed / trading disabled by the server)
-input int    LocalBlockBackoffSec = 10;    // LOCAL-rejection backoff (err 4109/4110/4111: the terminal has not armed this EA yet)
-input bool   UseSessionFilter    = true;   // Friday pre-close flatten
-input int    PreCloseCloseMin    = 5;      // flatten window before Friday close
-input bool   PreCloseWeekendOnly = true;   // true = flatten only before the WEEKEND close; false = before every daily close
-input int    WeekendGapHours     = 6;      // gap-classification threshold (kept for set compatibility with MT5)
-input int    FridayCloseHourGMT  = 21;     // gold/FX weekly close hour (GMT)
-input int    Oracle_OpenWarmupMin = 15;    // veto entries N min after a session (re)open
+input string __MAIN__            = "======== MAIN ========";
+input string Symbol_Traded       = "XAUUSDm"; // Symbol to trade
+input int    TakeProfit_Pips     = 15;     // Take Profit (pips)
+input int    GridStep_Pips       = 100;    // Grid Step (pips)
+input double Lot_Fixed           = 0.01;   // Fixed Lot
+input double Lot_Factor          = 1.0;    // Lot Factor (1.0 = additive)
+input int    MaxSpread_Points    = 240;    // Max Spread (points, 0 = off)
+input int    MaxGrid_Levels      = 0;      // Max Grid Levels (0 = use capital-proportional cap)
+input double DailyLoss_USD       = 200.0;  // Daily Loss -> close all + pause (USD, 0 = off)
+input double BasketStop_USD      = 0;      // Basket Stop (USD, 0 = off)
 
-input string Oracle_Symbols      = "XAUUSDm"; // ONE traded symbol (first CSV entry)
-input int    Oracle_TF           = 1;      // signal timeframe in minutes (1 = M1, like the MT5 build)
-input bool   Oracle_EngineA      = true;   // engine A (magic 7799): BUY side when both on
-input bool   Oracle_EngineB      = true;   // engine B (magic 9977): SELL side when both on
-input double Oracle_FixedLot     = 0.01;
-input int    Oracle_TakeProfit   = 20;     // strategy pips (Point*10)
-input int    Oracle_GridSize     = 50;     // strategy pips between levels
-input double Oracle_GridFactor   = 1.0;    // additive grid (1.0 = constant lot)
-input int    Oracle_MinSecsBetweenAdds = 2; // min seconds between grid adds of the same engine (the timer AND ticks run the grid; a tick burst could add several levels in one second before the fresh order shows, stacking them and violating GridSize). 0 = off.
-input double Oracle_MaxLot       = 99.0;
-input int    Oracle_MaPeriod     = 34;     // MA confirm filter period
-input int    Oracle_MaMethod     = 1;      // 1 = EMA, otherwise SMA
-input int    Oracle_HILOPeriod   = 3;      // Gann HiLo period
-input bool   Oracle_HILOInvert   = false;  // invert the HiLo side
-input int    Oracle_MaxSpread    = 240;    // points; 0 = off
-input int    Oracle_MaxGridLevels = 0;     // hard depth cap (0 = use the proportional cap below)
-input double Oracle_BaseCapital   = 1000;  // declared capital for the proportional depth cap
-input double Oracle_DollarsPerLevel = 180; // 1 grid level per N dollars of BaseCapital (0 = no proportional cap)
-input bool   Oracle_NewBasketNeedsEMA = false; // a NEW basket also needs the EMA to agree with the HiLo side (adds are never gated). Hot-switchable: EMAGATE ON|OFF
-input double Oracle_BasketStopUSD = 0;     // cut a basket at -N USD floating (0 = off)
-input int    Oracle_BasketStopCooldownMin = 30;
-input bool   Oracle_UseRegimeFilter = false; // veto entries/adds against a strong H1 trend (soft)
-input int    Oracle_RegimeADX      = 27;   // ADX(14) H1 above this = strong trend
-input double Oracle_RegimeATRDist  = 3.0;  // price further than N x ATR(14) H1 from EMA200 H1 also blocks (0 = ADX only)
-input bool   Oracle_UseServerSL     = true; // also arm a server-side SL per position, sized so the WHOLE basket losing at once approximates Oracle_BasketStopUSD. Broker executes it even if our close orders get rejected. No-op when Oracle_BasketStopUSD<=0.
+input string __SIGNAL__          = "======== SIGNAL ========";
+input int    Signal_TF           = 1;      // Signal Timeframe (minutes; 1 = M1)
+input int    MA_Period           = 34;     // MA Period
+input int    MA_Method           = 1;      // MA Method (1 = EMA, else SMA)
+input int    MA_AppliedPrice     = 1;      // MA Applied Price (0=Close 1=Open) - Oracle uses Open
+input int    HiLo_Period         = 3;      // HiLo Period
+input int    HiLo_Method         = 1;      // HiLo Method (1 = EMA, else SMA) - Oracle uses EMA
+
+input string __NEWS__            = "======== NEWS (blocks entries only) ========";
+input int    News_MinutesBefore  = 30;     // News Minutes Before event
+input int    News_MinutesAfter   = 45;     // News Minutes After event
+input int    News_RefreshMinutes = 60;     // News Refresh (minutes)
+input string News_TestMinutes    = "";     // News Test: fake USD event N min ahead (or TEST=N command)
+
+input string __DISPLAY__         = "======== DISPLAY ONLY (never blocks) ========";
+input bool   Show_HourRisk       = true;   // Show Hour Risk band on the panel
+input bool   Show_SessionWarning = true;   // Show Session Warning before the weekly close
+input int    SessionClose_HourGMT = 21;    // Session Close Hour GMT (gold/FX weekly close)
+input int    SessionWarn_Min     = 5;      // Session Warning minutes ahead of the close
+
+input string __ADVANCED__        = "======== ADVANCED ========";
+input bool   Engine_A_Sell       = true;   // Engine A (magic 7799) = SELL
+input bool   Engine_B_Buy        = true;   // Engine B (magic 9977) = BUY
+input double MaxLot_Total        = 99.0;   // Max Lot total per basket
+input int    MinSecs_BetweenAdds = 2;      // Min Seconds Between Adds (0 = off). The timer AND ticks run the grid; without a gap a tick burst stacks several levels before the fresh order is visible, violating GridStep.
+input int    BasketStop_CooldownMin = 30;  // Basket Stop Cooldown (minutes)
+input bool   BasketStop_ServerSL = true;   // Basket Stop also arms a server-side SL (no-op when BasketStop_USD = 0)
+input double Capital_Base        = 1000;   // Capital Base for the proportional depth cap
+input double Capital_PerLevel    = 180;    // Capital per grid Level (0 = no proportional cap)
+input int    OpenWarmup_Min      = 3;      // Open Warmup: veto entries N min after a session (re)open
+input int    ServerBlock_Min     = 10;     // Server Block backoff (minutes; broker refused trading)
+input int    LocalBlock_Sec      = 10;     // Local Block backoff (seconds; err 4109/4110/4111)
+input bool   ClosePendingOrders  = true;   // Close Pending Orders too on a close-all
+input string Log_FileName        = "Cerberus_log.csv"; // Log File Name
 
 //==================================================================
 // Globals
@@ -116,7 +93,7 @@ input bool   Oracle_UseServerSL     = true; // also arm a server-side SL per pos
 #define MAGIC_A 7799
 #define MAGIC_B 9977
 #define GV_PAUSE     "NG_ManualPause"
-#define GV_GUARD     "NG_DisabledByGuard"   // news turned AT off (separate from scheduler's g_schedHardLock so they don't fight over the button, like MT5)
+#define GV_GUARD     "NG_DisabledByGuard"   // news turned AT off (separate from scheduler's g_schedHardLock so they don't fight over the button)
 #define GV_DAYDATE   "NG_DayDate"
 #define GV_DAYBAL    "NG_DayStartBal"
 #define GV_OV_TP     "CB4_ovTP"
@@ -125,26 +102,25 @@ input bool   Oracle_UseServerSL     = true; // also arm a server-side SL per pos
 #define GV_OV_FACTOR "CB4_ovFactor"
 #define GV_OV_MAXLEV "CB4_ovMaxLev"
 #define GV_OV_BSTOP  "CB4_ovBstop"
-#define GV_OV_EMAGATE "CB4_ovEmaGate"
 #define GV_ORACLE_ON "CB4_OracleOn"
-#define PRESETS_FILE "symbol_presets.txt"
+// The Gann HiLo Activator is a STATEFUL indicator: its side persists until price
+// crosses the opposite band. A plain global resets to 0 on every OnInit, so after
+// each terminal restart the bias silently fell back to the MA side until the first
+// flip - a different state, not a neutral one, and nothing in the log said so.
+// Persisting it in a GV keeps the indicator's memory across restarts.
+// (Defect logged "pendiente" in docs/comparativa-cerberus-oracle-2026-07-21.md.)
+#define GV_HILO_SIDE "CB4_hiloSide"
 #define STATUS_FILE  "ng_status.json"
 #define COMMAND_FILE "ng_command.txt"
 
-string   g_watch[];              // guardian watch list
 string   g_sym = "";             // traded symbol
 bool     g_oracleOn = true;
 bool     g_paused = false;       // manual / rule E pause
-datetime g_volPauseUntil = 0;    // rule C pause (traded symbol)
 datetime g_srvBlockUntil = 0;    // server-rejection backoff
 datetime g_bstopUntil[2];        // per-engine basket-stop cooldown
 datetime g_lastAddTime[2];       // GMT of the last level opened per engine (add throttle)
 datetime g_openedAt = 0;         // last closed->open transition (warm-up)
 bool     g_sawClosed = false;
-datetime g_lastM1Bar = 0;        // last M1 bar the ATR spike/window rule was evaluated on (rule C runs once per CLOSED bar, like MT5)
-bool     g_regimeBlocked = false; // last regime-veto verdict, for the status JSON and the panel (homologated to MT5's g_regimeBlocked)
-datetime g_regimeEvalAt  = 0;     // GMT of the last regime evaluation. The verdict is only refreshed when the entry gate reaches it, so an earlier gate (hour filter, pause, market closed) leaves it STALE - the panel shows the age so a stale "clear" cannot be mistaken for a live one
-int      g_regimeDir     = 0;     // signal direction that last verdict referred to (+1 BUY / -1 SELL)
 bool     g_wasInWindow = false;  // news: were we inside a news window on the previous pass
 string   g_activeEventName = ""; // news: name of the event currently pausing us
 int      g_bstopHitsToday = 0;
@@ -152,19 +128,24 @@ datetime g_lastFeed = 0;
 datetime g_lastFeedOk = 0;       // last SUCCESSFUL feed (panel "Feed: OK (age)")
 datetime g_nextEvent = 0;        // nearest watched High event (0 = none)
 string   g_nextEventTxt = "";
-string   g_evTitle[64];          // event titles (panel NEXT line, like MT5)
+string   g_evTitle[64];          // event titles (panel NEXT line)
 string   g_feedStatus = "-";
 double   g_ovTP = -1, g_ovGrid = -1, g_ovLot = -1, g_ovFactor = -1, g_ovBstop = -1;
-int      g_ovEmaGate = -1;   // effective NewBasketNeedsEMA (-1 => use input, 0 off, 1 on)
 int      g_ovMaxLev = -1;
 
-double EffTP()     { return (g_ovTP    > 0) ? g_ovTP    : Oracle_TakeProfit; }
-double EffGrid()   { return (g_ovGrid  > 0) ? g_ovGrid  : Oracle_GridSize; }
-double EffLot()    { return (g_ovLot   > 0) ? g_ovLot   : Oracle_FixedLot; }
-double EffFactor() { return (g_ovFactor > 0) ? g_ovFactor : Oracle_GridFactor; }
-int    EffMaxLev() { return (g_ovMaxLev >= 0) ? g_ovMaxLev : Oracle_MaxGridLevels; }
-double EffBstop()  { return (g_ovBstop >= 0) ? g_ovBstop : Oracle_BasketStopUSD; }
-bool   EmaGateOn() { return (g_ovEmaGate >= 0) ? (g_ovEmaGate > 0) : Oracle_NewBasketNeedsEMA; }
+double EffTP()     { return (g_ovTP    > 0) ? g_ovTP    : TakeProfit_Pips; }
+double EffGrid()   { return (g_ovGrid  > 0) ? g_ovGrid  : GridStep_Pips; }
+double EffLot()    { return (g_ovLot   > 0) ? g_ovLot   : Lot_Fixed; }
+double EffFactor() { return (g_ovFactor > 0) ? g_ovFactor : Lot_Factor; }
+int    EffMaxLev() { return (g_ovMaxLev >= 0) ? g_ovMaxLev : MaxGrid_Levels; }
+double EffBstop()  { return (g_ovBstop >= 0) ? g_ovBstop : BasketStop_USD; }
+
+// Side each engine takes when BOTH are on. Oracle 2.0 runs magic 7799 SHORT and
+// magic 9977 LONG - measured 1 Hz on 2026-07-21 (docs/comparativa §3.2), which is
+// the reverse of its own cosmetic "Engine A [BUY]" labels AND the reverse of what
+// this port did until v2.0. Corrected for fidelity and so per-magic metrics are
+// comparable between the two bots; with one engine per side the swap is P/L-neutral.
+int EngineSide(int magic) { return (magic == MAGIC_A) ? -1 : 1; }
 
 //==================================================================
 // Utilities
@@ -173,7 +154,7 @@ string g_lastAction = "-";
 void LogAction(string action, string detail)
 {
    if (action != "INIT" && action != "DEINIT") g_lastAction = detail;
-   int h = FileOpen(LogFileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI);
+   int h = FileOpen(Log_FileName, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI);
    if (h == INVALID_HANDLE) { Print("LOG FAIL ", action, " | ", detail); return; }
    FileSeek(h, 0, SEEK_END);
    FileWriteString(h, TimeToString(TimeGMT(), TIME_DATE | TIME_SECONDS) + ";" + action + ";" + detail + "\r\n");
@@ -181,22 +162,19 @@ void LogAction(string action, string detail)
    Print("Cerberus4: ", action, " | ", detail);
 }
 
-// Strategy pip, homologated to MT5's Oracle_Pip: 10 points for 3/5/6-digit
-// symbols (gold, most FX, crypto crosses), 1 point otherwise. On XAUUSDm (3
-// digits) this is point*10, unchanged; it only differs on 2/4-digit symbols,
-// where the old always-x10 gave TP/GridSize 10x off after a SYMBOL/PRESET switch.
+// Strategy pip: 10 points for 3/5/6-digit symbols (gold, most FX), 1 point
+// otherwise. On XAUUSDm (3 digits) this is point*10 = $0.01.
 double StratPip(string sym)
 {
    double pt = MarketInfo(sym, MODE_POINT);
    int    dg = (int)MarketInfo(sym, MODE_DIGITS);
    return (dg == 3 || dg == 5 || dg == 6) ? pt * 10.0 : pt;
 }
-double GuardPip(string sym) { return (PipSizeOverride > 0) ? PipSizeOverride : StratPip(sym); }
 
 bool IsOurMagic(int m) { return (m == MAGIC_A || m == MAGIC_B); }
 int  EngineIdx(int m)  { return (m == MAGIC_A) ? 0 : 1; }
 
-// Close one ticket. Homologated to MT5's CloseOnePosition: up to 3 attempts with
+// Close one ticket: up to 3 attempts with
 // a quote refresh between them. The MT4 port had lost that loop, so a single
 // transient rejection killed the close: on 2026-07-21 00:26:30 a basket-stop cut
 // failed with err 136 (off quotes) and the position survived its own stop.
@@ -223,7 +201,7 @@ bool ClosePosition(int ticket, string reason)
       LogAction("ORDER_CLOSE_FAIL", StringFormat("#%d attempt %d err=%d (%s)", ticket, attempt, err, reason));
       if (err == 133 || err == 4059 || err == 132)   // trade disabled / market closed: does not clear in this pass
       {
-         g_srvBlockUntil = TimeGMT() + SrvBlockBackoffMin * 60;
+         g_srvBlockUntil = TimeGMT() + ServerBlock_Min * 60;
          return false;
       }
       if (err == 4109 || err == 4110 || err == 4111) return false;   // local permission: retried by the caller's next pass
@@ -258,7 +236,7 @@ datetime ParseFFDate(string s)  // "2026-07-20T08:30:00-04:00"
    int hh = (int)StringToInteger(StringSubstr(s, 11, 2));
    int mi = (int)StringToInteger(StringSubstr(s, 14, 2));
    datetime t = StringToTime(StringFormat("%04d.%02d.%02d %02d:%02d", y, mo, d, hh, mi));
-   // apply the numeric UTC offset at the tail (+HH:MM / -HH:MM / Z)
+ // apply the numeric UTC offset at the tail (+HH:MM / -HH:MM / Z)
    int off = 0;
    int n = StringLen(s);
    if (n >= 25)
@@ -284,27 +262,38 @@ void ParseCalendar(string json)
       int endb = StringFind(json, "}", ip); if (endb < 0) break;
       string obj = StringSubstr(json, start, endb - start + 1);
       pos = endb + 1;
-      if (StringFind(obj, "\"country\":\"USD\"") < 0 && StringFind(obj, "\"currency\":\"USD\"") < 0) continue;
+ // ALL currencies, not just USD - Oracle's feed has no country filter, it
+ // pauses on any High-impact event (measured: this week 0 USD-High but 11
+ // High across CAD/GBP/AUD/EUR incl. the ECB, which Oracle respects and the
+ // old USD-only Cerberus ignored). Gold reacts to every major central bank.
       int dp = StringFind(obj, "\"date\":\"");
       if (dp < 0) continue;
       int dq = StringFind(obj, "\"", dp + 8);
       datetime t = ParseFFDate(StringSubstr(obj, dp + 8, dq - dp - 8));
       if (t <= 0) continue;
+      string ccy = "";
+      int cp = StringFind(obj, "\"country\":\"");
+      if (cp < 0) cp = StringFind(obj, "\"currency\":\"");
+      if (cp >= 0) { int cs = StringFind(obj, "\"", cp + 10) + 1; int ce = StringFind(obj, "\"", cs); ccy = StringSubstr(obj, cs, ce - cs); }
       string title = "";
       int tp = StringFind(obj, "\"title\":\"");
       if (tp >= 0) { int tq = StringFind(obj, "\"", tp + 9); title = StringSubstr(obj, tp + 9, tq - tp - 9); }
-      g_evTitle[g_eventsLoaded] = title;
+      g_evTitle[g_eventsLoaded] = (ccy != "" ? ccy + " " : "") + title;
       g_eventTimes[g_eventsLoaded++] = t;
    }
-   // nearest upcoming
+ // nearest upcoming (any currency), carrying its title for the pause message
    for (int i = 0; i < g_eventsLoaded; i++)
-      if (g_eventTimes[i] > TimeGMT() - MinutesAfter * 60)
-         if (g_nextEvent == 0 || g_eventTimes[i] < g_nextEvent) g_nextEvent = g_eventTimes[i];
+      if (g_eventTimes[i] > TimeGMT() - News_MinutesAfter * 60)
+         if (g_nextEvent == 0 || g_eventTimes[i] < g_nextEvent)
+         {
+            g_nextEvent = g_eventTimes[i];
+            g_nextEventTxt = g_evTitle[i];
+         }
 }
 
 void RefreshFeed()
 {
-   if (g_lastFeed > 0 && TimeGMT() - g_lastFeed < FeedRefreshMinutes * 60) return;
+   if (g_lastFeed > 0 && TimeGMT() - g_lastFeed < News_RefreshMinutes * 60) return;
    g_lastFeed = TimeGMT();
    string url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
    char data[], result[]; string rh;
@@ -339,63 +328,53 @@ bool InNewsWindow(string &eventName)
    eventName = "";
    if (g_nextEvent == 0) return false;
    datetime now = TimeGMT();
-   if (now >= g_nextEvent - MinutesBefore * 60 && now <= g_nextEvent + MinutesAfter * 60)
+   if (now >= g_nextEvent - News_MinutesBefore * 60 && now <= g_nextEvent + News_MinutesAfter * 60)
    {
-      eventName = (g_nextEventTxt != "") ? g_nextEventTxt : "USD High";
+      eventName = (g_nextEventTxt != "") ? g_nextEventTxt : "High impact";
       return true;
    }
    return false;
 }
 bool InNewsWindow() { string e; return InNewsWindow(e); }   // convenience overload for gate/panel checks
 
-// News guardian, homologated to MT5's EvaluateNewsState (2026-07-21). On ENTERING
-// a news window: close every order and turn the GLOBAL AutoTrading button OFF
-// (so no EA trades through the event); on LEAVING: turn it back ON. Uses GV_GUARD
-// (separate from the scheduler's g_schedHardLock and from GV_PAUSE) so news and
-// the scheduler never fight over the button. Runs every tick/timer. Before this,
-// MT4 only soft-blocked new entries during news and left open baskets running.
+// News state, v2.0: TRACKING ONLY. Entering a window no longer closes anything and
+// no longer touches the global AutoTrading button - it only stops NEW entries via
+// the gate in OracleOnEngine, which is exactly what Oracle 2.0 does with
+// "When News Filter activates -> Close = False".
+//
+// Why the close was removed: flattening a basket on a news window REALIZES a loss
+// that the basket would usually have recovered at its shared TP. Measured
+// 2026-07-23, that class of forced cut is what pushed Cerberus's avg_loss to
+// -$3.58 against Oracle's -$1.78 while WINNING more often (66.5% vs 62%).
 void EvaluateNewsState()
 {
-   bool manualPause = GlobalVariableCheck(GV_PAUSE);
    string evName = "";
    bool inWindow = InNewsWindow(evName);
-
-   if (manualPause)
-   {
-      // Manual pause / rule E owns the button: keep AT off, do not fight it.
-      if (AutoTradingOn()) SetAutoTrading(false);
-      g_wasInWindow = inWindow;
-      return;
-   }
 
    if (inWindow)
    {
       g_activeEventName = evName;
-      if (!g_wasInWindow) LogAction("WINDOW_ENTER", evName);
-      if (AutoTradingOn())
-      {
-         CloseEverything("news: " + evName);
-         SetAutoTrading(false);
-         GlobalVariableSet(GV_GUARD, 1);
-         LogAction("AUTOTRADING_OFF", evName);
-      }
+      if (!g_wasInWindow) LogAction("WINDOW_ENTER", evName + " (entries blocked, open baskets left alone)");
    }
    else
    {
       if (g_wasInWindow) LogAction("WINDOW_EXIT", g_activeEventName);
       g_activeEventName = "";
-      if (GlobalVariableCheck(GV_GUARD) && !AutoTradingOn())
-      {
-         SetAutoTrading(true);
-         GlobalVariableDel(GV_GUARD);
-         LogAction("AUTOTRADING_ON", "window over");
-      }
-      else if (GlobalVariableCheck(GV_GUARD) && AutoTradingOn())
-      {
-         GlobalVariableDel(GV_GUARD);   // button already on (user re-enabled) - just clear our flag
-      }
    }
    g_wasInWindow = inWindow;
+
+ // Legacy: older builds parked an "AT turned off by news" flag here. Nothing sets
+ // it any more, so clear a stale one left over from a v1.x run or the button would
+ // stay off forever with no rule owning it.
+   if (GlobalVariableCheck(GV_GUARD))
+   {
+      GlobalVariableDel(GV_GUARD);
+      if (!AutoTradingOn() && !GlobalVariableCheck(GV_PAUSE))
+      {
+         SetAutoTrading(true);
+         LogAction("AUTOTRADING_ON", "clearing a stale v1.x news lock");
+      }
+   }
 }
 
 //==================================================================
@@ -420,170 +399,51 @@ void ApplyDefenseRules()
    if (!IsConnected() || AccountBalance() <= 0) return;
    Rule_DailyBaseline();
 
-   // Rule E: daily loss. Homologated to MT5: close everything AND turn the global
-   // AutoTrading button OFF (not just the soft g_paused flag), so no EA in the
-   // terminal keeps trading during the pause. RESUME re-enables both.
-   // Guard `!GlobalVariableCheck(GV_PAUSE)` homologated to MT5 (line 1478): do not
-   // re-fire while already paused, or it re-closes and re-logs RULE_DAILY_LOSS
-   // every timer/tick pass (the 5s spam seen 2026-07-21). GV_PAUSE is deleted by
-   // RESUME, so the rule can arm again on the next day / after a manual resume.
+ // Rule E: daily loss: close everything AND turn the global
+ // AutoTrading button OFF (not just the soft g_paused flag), so no EA in the
+ // terminal keeps trading during the pause. RESUME re-enables both.
+ // Guard `!GlobalVariableCheck(GV_PAUSE)`: do not
+ // re-fire while already paused, or it re-closes and re-logs RULE_DAILY_LOSS
+ // every timer/tick pass (the 5s spam seen 2026-07-21). GV_PAUSE is deleted by
+ // RESUME, so the rule can arm again on the next day / after a manual resume.
    double dayLoss = GlobalVariableGet(GV_DAYBAL) - AccountEquity();
-   if (MaxDailyLossUSD > 0 && dayLoss >= MaxDailyLossUSD && !GlobalVariableCheck(GV_PAUSE))
+   if (DailyLoss_USD > 0 && dayLoss >= DailyLoss_USD && !GlobalVariableCheck(GV_PAUSE))
    {
-      LogAction("RULE_DAILY_LOSS", StringFormat("day loss %.2f >= %.2f: closing everything and pausing", dayLoss, MaxDailyLossUSD));
+      LogAction("RULE_DAILY_LOSS", StringFormat("day loss %.2f >= %.2f: closing everything and pausing", dayLoss, DailyLoss_USD));
       CloseEverything("maximum daily loss");
-      // 2 = "the guardian paused this", vs 1 = "a human paused this". Every other
-      // check only asks whether the GV exists, so both still mean paused; only
-      // DoResetDay tells them apart (it may lift a rule E pause, never a human one).
+ // 2 = "the guardian paused this", vs 1 = "a human paused this". Every other
+ // check only asks whether the GV exists, so both still mean paused; only
+ // DoResetDay tells them apart (it may lift a rule E pause, never a human one).
       g_paused = true; GlobalVariableSet(GV_PAUSE, 2);
       SetAutoTrading(false);
       return;
    }
 
-   // Rule B: margin protection. Homologated to MT5 - close the WORST position
-   // repeatedly (up to 10 per pass) until the margin level recovers, instead of
-   // closing only one per timer pass. Recomputes the margin level each iteration.
-   if (MinMarginLevelPct > 0)
-   {
-      for (int iter = 0; iter < 10; iter++)
-      {
-         double margin = AccountMargin();
-         if (margin <= 0) break;
-         double ml = AccountEquity() / margin * 100.0;
-         if (ml >= MinMarginLevelPct) break;
-
-         int worst = -1; double worstPl = 0;
-         for (int i = OrdersTotal() - 1; i >= 0; i--)
-            if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderType() <= OP_SELL)
-            {
-               double p = OrderProfit() + OrderSwap() + OrderCommission();
-               if (worst < 0 || p < worstPl) { worstPl = p; worst = OrderTicket(); }
-            }
-         if (worst < 0) break;
-         LogAction("RULE_MARGIN", StringFormat("margin level %.1f%% < %.1f%%: closing worst #%d (%.2f)", ml, MinMarginLevelPct, worst, worstPl));
-         if (!ClosePosition(worst, "margin level")) break;
-      }
-   }
-
-   // Rules A + D per position. Homologated to MT5: the WHOLE of rule A (fixed
-   // pips AND the ATR-relative variant) is gated on MaxAdversePips>0, so setting
-   // MaxAdversePips=0 disables rule A entirely - matching MT5, where a 0 turns the
-   // rule off. (With the production default 300 this changes nothing.)
-   for (int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES) || OrderType() > OP_SELL) continue;
-      string sym = OrderSymbol();
-      double gpip = GuardPip(sym);
-      double bid = MarketInfo(sym, MODE_BID), ask = MarketInfo(sym, MODE_ASK);
-      double adverse = (OrderType() == OP_BUY) ? (OrderOpenPrice() - bid) / gpip
-                                               : (ask - OrderOpenPrice()) / gpip;
-      double pl = OrderProfit() + OrderSwap() + OrderCommission();
-      if (MaxAdversePips > 0)
-      {
-         double ruleAThr = MaxAdversePips;
-         if (RuleA_xATR > 0)
-         {
-            double atrA = iATR(sym, PERIOD_M1, VolATRPeriod, 1);
-            if (atrA > 0) ruleAThr = MathMax(ruleAThr, RuleA_xATR * atrA / gpip);
-         }
-         if (adverse >= ruleAThr)
-         {
-            LogAction("RULE_PIPS", StringFormat("#%d %s %.1f pips against (limit %.0f)", OrderTicket(), sym, adverse, ruleAThr));
-            ClosePosition(OrderTicket(), "adverse pips");
-            continue;
-         }
-      }
-      if (MaxLossPerTradeUSD > 0 && pl <= -MaxLossPerTradeUSD)
-      {
-         LogAction("RULE_LOSS_USD", StringFormat("#%d %s P/L %.2f (limit -%.2f)", OrderTicket(), sym, pl, MaxLossPerTradeUSD));
-         ClosePosition(OrderTicket(), "USD loss per position");
-      }
-   }
-
+ // v2.0: rules A (adverse pips), B (margin level) and D (USD per position) were
+ // REMOVED. All three closed individual positions out of a basket, which realizes
+ // a loss and breaks the average the shared TP depends on - the mechanism behind
+ // the -$3.58 avg_loss. Oracle 2.0 has none of them (Stop Loss 0.0, Equity
+ // Protection all 0.0) and loses less per trade while winning less often.
+ //
+ // Rule B specifically was checked with this account's real numbers before
+ // dropping it: XAUUSDm ~$4047 at 1:200 means 0.01 lot locks ~$20.24 of margin,
+ // so on $1k the margin level only reaches 200% around 20 open levels / -$190
+ // floating - the same depth where rule E already fires at -$200. It was a third
+ // redundant cut, not a last-resort net (Exness stops out near 0-60%).
 }
 
-// Rule C: volatility circuit breaker on the traded symbol. HOMOLOGATED TO MT5
-// (2026-07-21): the ATR spike and the N-bar window are evaluated ONCE PER CLOSED
-// M1 BAR (shift 1), guarded by g_lastM1Bar - exactly like MT5's CheckVolatilitySpike,
-// which has `if (barT == g_lastM1Bar[i]) continue`. Only the FIXED-pips variant
-// (VolSpikePips) runs intrabar on the forming candle, in CheckSpikePipsLive below,
-// matching MT5's CheckSpikePipsLive (shift 0 and 1). Before this, MT4 evaluated
-// the ATR spike on the forming candle (shift 0) every tick, cutting up to ~60s
-// earlier than MT5 on the same move - the divergence this fix removes.
-void CloseSymbolBasketsC()   // helper: rule C flush of the traded symbol's Oracle positions
-{
-   for (int i = OrdersTotal() - 1; i >= 0; i--)
-      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderSymbol() == g_sym && IsOurMagic(OrderMagicNumber()))
-         ClosePosition(OrderTicket(), "Oracle rule C spike");
-}
-
-void CheckVolatilitySpike()
-{
-   if (VolSpikeATRmult <= 0 && VolWindowATRmult <= 0) return;
-   // Once per CLOSED M1 bar only (like MT5). The forming-candle ATR spike is NOT
-   // evaluated here - that intrabar path is fixed-pips only (CheckSpikePipsLive).
-   datetime barT = iTime(g_sym, PERIOD_M1, 1);
-   if (barT == 0 || barT == g_lastM1Bar) return;
-   g_lastM1Bar = barT;
-
-   double atr = iATR(g_sym, PERIOD_M1, VolATRPeriod, 1);
-   if (atr <= 0) return;
-   double spip = StratPip(g_sym);
-
-   double candle = iHigh(g_sym, PERIOD_M1, 1) - iLow(g_sym, PERIOD_M1, 1);
-   if (VolSpikeATRmult > 0 && candle >= VolSpikeATRmult * atr && TimeGMT() > g_volPauseUntil)
-   {
-      g_volPauseUntil = TimeGMT() + VolPauseMinutes * 60;
-      LogAction("VOL_SPIKE", StringFormat("%s M1 candle = %.1f pips (ATR %.1f), pause %d min",
-                g_sym, candle / spip, atr / spip, VolPauseMinutes));
-      if (CloseOnVolSpike) CloseSymbolBasketsC();
-      return;
-   }
-
-   if (VolWindowATRmult > 0 && VolWindowM1Bars > 1)
-   {
-      int hiBar = iHighest(g_sym, PERIOD_M1, MODE_HIGH, VolWindowM1Bars, 1);
-      int loBar = iLowest (g_sym, PERIOD_M1, MODE_LOW,  VolWindowM1Bars, 1);
-      if (hiBar < 0 || loBar < 0) return;
-      double window = iHigh(g_sym, PERIOD_M1, hiBar) - iLow(g_sym, PERIOD_M1, loBar);
-      if (window >= VolWindowATRmult * atr && TimeGMT() > g_volPauseUntil)
-      {
-         g_volPauseUntil = TimeGMT() + VolPauseMinutes * 60;
-         LogAction("VOL_SPIKE", StringFormat("%s %d-bar window = %.1f pips (ATR %.1f), pause %d min",
-                   g_sym, VolWindowM1Bars, window / spip, atr / spip, VolPauseMinutes));
-         if (CloseOnVolSpike) CloseSymbolBasketsC();
-      }
-   }
-}
-
-// Fixed-pips spike, evaluated INTRABAR (forming candle shift 0 and last closed
-// shift 1) every tick - the only rule-C path MT5 runs live. No-op unless
-// VolSpikePips>0 (default 0). Mirrors MT5's CheckSpikePipsLive exactly.
-void CheckSpikePipsLive()
-{
-   if (VolSpikePips <= 0) return;
-   double spip = StratPip(g_sym);
-   if (spip <= 0) return;
-   for (int shift = 0; shift <= 1; shift++)
-   {
-      if (iTime(g_sym, PERIOD_M1, shift) == 0) continue;
-      double candle = iHigh(g_sym, PERIOD_M1, shift) - iLow(g_sym, PERIOD_M1, shift);
-      if (candle / spip < VolSpikePips) continue;
-      if (TimeGMT() > g_volPauseUntil)
-      {
-         g_volPauseUntil = TimeGMT() + VolPauseMinutes * 60;
-         LogAction("VOL_SPIKE", StringFormat("%s M1 candle %s of %.1f pips (fixed limit %.0f), pause %d min",
-                   g_sym, shift == 0 ? "IN PROGRESS" : "closed", candle / spip, VolSpikePips, VolPauseMinutes));
-         if (CloseOnVolSpike) CloseSymbolBasketsC();
-      }
-      return;
-   }
-}
+// v2.0: rule C (volatility circuit breaker) was REMOVED - the ATR spike, the
+// N-bar window, the fixed-pips variant, the renewable pause and CloseOnVolSpike.
+// It cut baskets on exactly the moves a grid is built to average through, and
+// Oracle 2.0 has no equivalent. Measurement that closed the argument
+// (memory: filtro-horario-sin-respaldo-datos): BASKET_STOP events cluster at
+// 02-03 UTC, a band the risk table calls VERY LOW - the breaker was firing on
+// volatility that had no relation to where the damage actually happened.
 
 //==================================================================
-// Session guards: Friday pre-close flatten + open warm-up
+// Session guards: open warm-up (+ display-only weekly-close warning)
 //==================================================================
-// Instrument class, 1:1 with MT5's SymClass: 2=crypto, 1=metal, 0=other.
+// Instrument class: 2=crypto, 1=metal, 0=other.
 // Used to exempt crypto from the weekend pre-close (crypto trades 24/7).
 int SymClass(string sym)
 {
@@ -595,21 +455,19 @@ int SymClass(string sym)
    return 0;
 }
 
-// Tradable now. Homologated to MT5's MarketOpen: respects UseSessionFilter.
-// API LIMIT: MT4 has no SymbolInfoSessionTrade, so we cannot read the broker's
-// exact session table like MT5 does. MODE_TRADEALLOWED is the closest proxy the
-// MT4 API exposes - it goes false when the symbol is not tradable (closed /
-// rollover pause), which is what the session check gates on. Not bit-identical
-// to MT5's InTradingSession, but the same effect for the traded symbol.
+// Tradable now. MT4 has no SymbolInfoSessionTrade, so MODE_TRADEALLOWED is the
+// closest proxy: it goes false when the symbol is not tradable (closed / rollover
+// pause), which is exactly what we need to gate on.
+// Unconditional in v2.0: this is not a risk filter, it is "can we send an order at
+// all". Trying to trade a closed market only earns err 132/133 spam and a 10-minute
+// server backoff, so there is nothing to switch off.
 bool MarketOpenNow(string sym)
 {
-   if (!UseSessionFilter) return true;   // filter off -> never block (like MT5)
    return (MarketInfo(sym, MODE_TRADEALLOWED) != 0);
 }
 
 //==================================================================
-// Hour-risk filter + scheduler + regime filter + AT toggle
-// (1:1 homologs of the MT5 build)
+// Hour-risk table (DISPLAY ONLY in v2.0) + regime filter + AT toggle
 //==================================================================
 int HourRisk(int minUTC)   // minute of the UTC day [0,1440)
 {
@@ -623,32 +481,12 @@ int HourRisk(int minUTC)   // minute of the UTC day [0,1440)
 
 int NowMinUTC() { return TimeHour(TimeGMT()) * 60 + TimeMinute(TimeGMT()); }
 
-bool HourBlocked() { return UseHourFilter && HourRisk(NowMinUTC()) >= HourBlockRisk; }
-
-int SchedParseHHMM(string s)
-{
-   StringTrimLeft(s); StringTrimRight(s);
-   if (StringLen(s) == 0) return -1;
-   int colon = StringFind(s, ":");
-   if (colon <= 0) return -1;
-   int h = (int)StringToInteger(StringSubstr(s, 0, colon));
-   int m = (int)StringToInteger(StringSubstr(s, colon + 1));
-   if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
-   return h * 60 + m;
-}
-
-bool SchedDayAllowed()
-{
-   switch (TimeDayOfWeek(TimeGMT()))
-   {
-      case 0: return SchedSunday;    case 1: return SchedMonday;
-      case 2: return SchedTuesday;   case 3: return SchedWednesday;
-      case 4: return SchedThursday;  case 5: return SchedFriday;
-      default: return SchedSaturday;
-   }
-}
-
-bool g_schedHardLock = false;   // HARD mode: AT was turned off by us
+// v2.0: HourBlocked is GONE - the table above is published to the panel and to
+// ng_status.json and never gates an entry. The whole scheduler (UseSchedule,
+// Sched1-4, per-day toggles, SchedKillAT) is gone with it: its defaults blocked
+// 08:00-09:30 and 12:00-15:30, which are EXACTLY the two VERY HIGH bands of
+// HourRisk - the same block applied twice - and SchedKillAT killed the terminal-
+// global AutoTrading button behind a GV lock that survived restarts.
 
 void ToggleAutoTrading()
 {
@@ -656,14 +494,14 @@ void ToggleAutoTrading()
    PostMessageW(hRoot, WM_COMMAND, MT4_CMD_AUTOTRADING, 0);
 }
 
-// AutoTrading state helpers, homologated to MT5 (AutoTradingOn / SetAutoTrading).
+// AutoTrading state helpers.
 // The AutoTrading button is terminal-global; toggling it affects every EA.
 bool AutoTradingOn() { return (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0); }
 
 // TERMINAL_TRADE_ALLOWED only reflects the GLOBAL AutoTrading button. The per-EA
 // "Allow live trading" checkbox (F7 -> Common) and the short window right after an
 // INIT, while the terminal re-arms the expert, are visible ONLY through
-// IsTradeAllowed(). Sending an order without checking it is what produced the
+// IsTradeAllowed. Sending an order without checking it is what produced the
 // err 4109 one second after every restart. Logged at most once a minute so a
 // genuinely unchecked box still shows up instead of failing silently.
 bool TradingPermitted()
@@ -684,134 +522,41 @@ void SetAutoTrading(bool enable)
    ToggleAutoTrading();
 }
 
-bool SchedInWindow()
-{
-   if (!SchedDayAllowed()) return true;   // whole UTC day vetoed
-   int now = NowMinUTC();
-   string ws[4]; string we[4];
-   ws[0] = Sched1Start; we[0] = Sched1End; ws[1] = Sched2Start; we[1] = Sched2End;
-   ws[2] = Sched3Start; we[2] = Sched3End; ws[3] = Sched4Start; we[3] = Sched4End;
-   for (int i = 0; i < 4; i++)
-   {
-      int a = SchedParseHHMM(ws[i]), b = SchedParseHHMM(we[i]);
-      if (a < 0 || b < 0 || a == b) continue;
-      if (a < b) { if (now >= a && now < b) return true; }
-      else       { if (now >= a || now < b) return true; }   // wraps midnight
-   }
-   return false;
-}
-
-bool SchedBlocked()
-{
-   if (!UseSchedule) return false;
-   bool inWin = SchedInWindow();
-   if (SchedKillAT)
-   {
-      bool at = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
-      if (inWin && !g_schedHardLock)
-      {
-         LogAction("SCHED_HARD", "window entered: closing everything and turning AutoTrading OFF");
-         CloseEverything("scheduler HARD window");
-         if (at) ToggleAutoTrading();
-         g_schedHardLock = true;
-      }
-      else if (!inWin && g_schedHardLock)
-      {
-         LogAction("SCHED_HARD", "window left: turning AutoTrading back ON");
-         if (!at) ToggleAutoTrading();
-         g_schedHardLock = false;
-      }
-   }
-   return inWin;
-}
-
-// Regime filter: veto entries/adds against a strong H1 trend (soft, fail-open).
-bool RegimeBlocked(int dir)
-{
-   if (!Oracle_UseRegimeFilter)
-   {
-      // Filter off: clear the cache. Without this the status JSON keeps
-      // publishing the last verdict from before it was switched off (seen live
-      // 2026-07-22: blocked=true with eval_age_s climbing past 450 s), which
-      // reads as an active veto that no longer exists.
-      g_regimeBlocked = false;
-      g_regimeEvalAt  = 0;
-      g_regimeDir     = 0;
-      return false;
-   }
-   if (dir == 0) return false;   // no signal this pass: leave the last verdict as it was
-   // Both conditions are evaluated on every pass (the old code returned early on
-   // the ADX one). The verdict is identical - it is an OR - but this way the
-   // transition log always carries the full picture, like MT5's.
-   double adx = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MAIN,    1);
-   double dip = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_PLUSDI,  1);
-   double dim = iADX(g_sym, PERIOD_H1, 14, PRICE_CLOSE, MODE_MINUSDI, 1);
-   bool contrary = (adx > Oracle_RegimeADX) && ((dir > 0) ? (dim > dip) : (dip > dim));
-
-   bool   extended = false;
-   double dist = 0;
-   if (Oracle_RegimeATRDist > 0)
-   {
-      double ema = iMA(g_sym, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE, 1);
-      double atr = iATR(g_sym, PERIOD_H1, 14, 1);
-      double px  = MarketInfo(g_sym, MODE_BID);   // live bid, homologated to MT5 (was iClose H1 close): MT5 reads the live bid so the regime veto reacts intrabar, not only at the H1 close
-      if (ema > 0 && atr > 0)
-      {
-         dist = (px - ema) / atr;                                  // signed distance in ATRs
-         extended = (dir > 0) ? (dist <= -Oracle_RegimeATRDist)    // buying deep under EMA200
-                              : (dist >=  Oracle_RegimeATRDist);   // selling far above EMA200
-      }
-   }
-
-   bool blocked = contrary || extended;
-   g_regimeEvalAt = TimeGMT();
-   g_regimeDir    = dir;
-   if (blocked != g_regimeBlocked)   // log the transition only, like the hour filter
-   {
-      g_regimeBlocked = blocked;
-      LogAction("REGIME_BLOCK", StringFormat("%s %s for %s: ADX=%.1f DI+=%.1f DI-=%.1f dist=%.2fxATR",
-                g_sym, blocked ? "ON" : "off", (dir > 0 ? "BUY" : "SELL"), adx, dip, dim, dist));
-   }
-   return blocked;
-}
-
 // Effective grid depth cap: hard cap wins; otherwise capital-proportional.
 int EffMaxLevels()
 {
    if (EffMaxLev() > 0) return EffMaxLev();
-   if (Oracle_DollarsPerLevel > 0 && Oracle_BaseCapital > 0)
-      return (int)MathMax(1, MathFloor(Oracle_BaseCapital / Oracle_DollarsPerLevel));
+   if (Capital_PerLevel > 0 && Capital_Base > 0)
+      return (int)MathMax(1, MathFloor(Capital_Base / Capital_PerLevel));
    return 9999;
 }
 
-// Weekend pre-close window. Homologated to MT5's Oracle_PreCloseBlocked as far
-// as the MT4 API allows. Two things brought to parity with MT5:
-//   - crypto is exempted (SymClass==2): it trades through the weekend, no gap.
-//   - only fires for the WEEKEND close (PreCloseWeekendOnly), not the nightly
-//     rollover, like MT5.
-// API LIMIT: MT5 asks the broker MinutesToSessionClose / IsWeekendClose (real
+// Weekend pre-close window. as far
+// as the MT4 API allows. Two design notes:
+// - crypto is exempted (SymClass==2): it trades through the weekend, no gap.
+// - only fires for the WEEKEND close (PreCloseWeekendOnly), not the nightly
+// rollover.
+// API LIMIT: a full session API would ask the broker MinutesToSessionClose / IsWeekendClose (real
 // session table). MT4 has no session API, so we approximate the weekend close
 // as Friday at FridayCloseHourGMT. If the Exness server offset is not exactly
-// GMT, this fires a few minutes off from MT5's session-accurate time - the one
+// GMT, this fires a few minutes off from the reference session-accurate time - the one
 // spot where exact parity is impossible on MT4. Set FridayCloseHourGMT to the
 // server's real Friday close (logged by LogSessions at OnInit).
-bool InFridayPreClose()
+// DISPLAY ONLY in v2.0. This used to flatten every basket minutes before the
+// weekly close ("weekend-gap protection"); now it only reports, because that
+// flatten realized whatever the basket happened to be holding at a fixed clock
+// time - the single most arbitrary of all the cuts.
+//
+// The weekend-gap risk it addressed is REAL and is NOT handled any more: a grid
+// left open over the ~49 h close can gap on Sunday's reopen. That is now a manual
+// decision (send CLOSEALL before Friday's close if you want to be flat).
+bool InSessionWarning()
 {
-   if (!UseSessionFilter || PreCloseCloseMin <= 0) return false;
-   if (SymClass(g_sym) == 2) return false;                                    // crypto never pre-closes (like MT5)
-   if (PreCloseWeekendOnly && TimeDayOfWeek(TimeGMT()) != 5) return false;    // weekend close = Friday
-   datetime closeT = StringToTime(TimeToString(TimeGMT(), TIME_DATE) + StringFormat(" %02d:00", FridayCloseHourGMT));
-   return (TimeGMT() >= closeT - PreCloseCloseMin * 60 && TimeGMT() < closeT);
-}
-
-void PreCloseFlatten()
-{
-   if (!InFridayPreClose()) return;
-   bool any = false;
-   for (int i = OrdersTotal() - 1; i >= 0; i--)
-      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderSymbol() == g_sym && IsOurMagic(OrderMagicNumber()))
-      { any = true; ClosePosition(OrderTicket(), "pre-close weekend-gap protection"); }
-   if (any) LogAction("PRECLOSE_FLATTEN", g_sym + " weekly close soon: flattening baskets (weekend-gap protection)");
+   if (!Show_SessionWarning || SessionWarn_Min <= 0) return false;
+   if (SymClass(g_sym) == 2) return false;                 // crypto trades 24/7, no weekly close
+   if (TimeDayOfWeek(TimeGMT()) != 5) return false;        // weekly close = Friday
+   datetime closeT = StringToTime(TimeToString(TimeGMT(), TIME_DATE) + StringFormat(" %02d:00", SessionClose_HourGMT));
+   return (TimeGMT() >= closeT - SessionWarn_Min * 60 && TimeGMT() < closeT);
 }
 
 bool ClosedOrWarmingUp()
@@ -820,10 +565,10 @@ bool ClosedOrWarmingUp()
    if (g_sawClosed)
    {
       g_sawClosed = false; g_openedAt = TimeGMT();
-      if (Oracle_OpenWarmupMin > 0)
-         LogAction("OPEN_WARMUP", StringFormat("%s: session reopened, entries vetoed %d min", g_sym, Oracle_OpenWarmupMin));
+      if (OpenWarmup_Min > 0)
+         LogAction("OPEN_WARMUP", StringFormat("%s: session reopened, entries vetoed %d min", g_sym, OpenWarmup_Min));
    }
-   return (Oracle_OpenWarmupMin > 0 && g_openedAt > 0 && TimeGMT() - g_openedAt < Oracle_OpenWarmupMin * 60);
+   return (OpenWarmup_Min > 0 && g_openedAt > 0 && TimeGMT() - g_openedAt < OpenWarmup_Min * 60);
 }
 
 //==================================================================
@@ -843,11 +588,11 @@ void Basket(string sym, int magic, int &n, int &dir, double &lots, double &avg, 
       sumLotPrice += OrderLots() * OrderOpenPrice();
       pl += OrderProfit() + OrderSwap() + OrderCommission();
       if (OrderOpenTime() >= lastTime) lastTime = OrderOpenTime();
-      // Anchor the grid to the basket EXTREME, not the newest-by-time level: with
-      // second-resolution OrderOpenTime and price rebounds, the newest level is
-      // often not the extreme, which let adds stack pips apart and violate the
-      // GridSize gate (measured 2026-07-20: 17/20 adds inside the gate, 21 levels
-      // instead of ~4). BUY grid anchors on the basket low, SELL on the high.
+ // Anchor the grid to the basket EXTREME, not the newest-by-time level: with
+ // second-resolution OrderOpenTime and price rebounds, the newest level is
+ // often not the extreme, which let adds stack pips apart and violate the
+ // GridSize gate (measured 2026-07-20: 17/20 adds inside the gate, 21 levels
+ // instead of ~4). BUY grid anchors on the basket low, SELL on the high.
       double op = OrderOpenPrice();
       if (loPrice == 0 || op < loPrice) loPrice = op;
       if (hiPrice == 0 || op > hiPrice) hiPrice = op;
@@ -865,19 +610,19 @@ void SetBasketTP(string sym, int magic)
    double point = MarketInfo(sym, MODE_POINT);
    double tp = NormalizeDouble(avg + dir * EffTP() * StratPip(sym), digits);
 
-   // Server-side SL backstop, sized so the WHOLE basket losing at once
-   // approximates the basket stop: distance = BasketStopUSD / (lots * $-per-
-   // point), off the CURRENT average, re-anchored on every add like the TP.
-   // The broker executes this itself even when our close orders get rejected
-   // (measured 2026-07-20: MT4's own basket stop fired on time but the server
-   // refused every close retry for ~25 min while price kept running, -$400+
-   // worse than the configured -$100 stop).
+ // Server-side SL backstop, sized so the WHOLE basket losing at once
+ // approximates the basket stop: distance = BasketStopUSD / (lots * $-per-
+ // point), off the CURRENT average, re-anchored on every add like the TP.
+ // The broker executes this itself even when our close orders get rejected
+ // (measured 2026-07-20: MT4's own basket stop fired on time but the server
+ // refused every close retry for ~25 min while price kept running, -$400+
+ // worse than the configured -$100 stop).
    double bidNow = MarketInfo(sym, MODE_BID);
    double askNow = MarketInfo(sym, MODE_ASK);
    double minDist = MarketInfo(sym, MODE_STOPLEVEL) * point;
 
    double slPx = 0;
-   if (Oracle_UseServerSL && EffBstop() > 0 && lots > 0)
+   if (BasketStop_ServerSL && EffBstop() > 0 && lots > 0)
    {
       double tickVal = MarketInfo(sym, MODE_TICKVALUE);
       double tickSize = MarketInfo(sym, MODE_TICKSIZE);
@@ -885,8 +630,8 @@ void SetBasketTP(string sym, int magic)
       {
          double pxDist = (EffBstop() / lots) * (tickSize / tickVal);
          slPx = (dir > 0) ? NormalizeDouble(avg - pxDist, digits) : NormalizeDouble(avg + pxDist, digits);
-         // Respect the broker's minimum stops distance from the CURRENT market
-         // price, or OrderModify is rejected (err 130) and the SL never gets set.
+ // Respect the broker's minimum stops distance from the CURRENT market
+ // price, or OrderModify is rejected (err 130) and the SL never gets set.
          if (dir > 0 && slPx > bidNow - minDist) slPx = NormalizeDouble(bidNow - minDist - point, digits);
          if (dir < 0 && slPx < askNow + minDist) slPx = NormalizeDouble(askNow + minDist + point, digits);
          if (dir > 0 && slPx >= avg) slPx = 0;   // sanity: never past the average
@@ -898,9 +643,9 @@ void SetBasketTP(string sym, int magic)
    {
       if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if (OrderSymbol() != sym || OrderMagicNumber() != magic || OrderType() > OP_SELL) continue;
-      // Staleness threshold homologated to MT5: pip*0.1 (=0.01 on gold), not
-      // point/2 (=0.0005). Prevents re-modifying the TP/SL on sub-pip drift, so
-      // MT4 sends far fewer OrderModify calls (was ~20x more than MT5).
+ // Staleness threshold: pip*0.1 (=0.01 on gold), not
+ // point/2 (=0.0005). Prevents re-modifying the TP/SL on sub-pip drift, so
+ // MT4 sends far fewer OrderModify calls (was ~20x more than needed).
       double staleTol = StratPip(sym) * 0.1;
       bool tpStale = MathAbs(OrderTakeProfit() - tp) > staleTol;
       bool slStale = (slPx > 0) && MathAbs(OrderStopLoss() - slPx) > staleTol;
@@ -940,70 +685,90 @@ bool OpenLevel(string sym, int magic, int dir, int level)
       int err = GetLastError();
       if (TimeGMT() >= g_srvBlockUntil)   // log once per backoff window, not per tick
          LogAction("ORACLE", StringFormat("%s open FAILED err=%d (engine %d level %d)", sym, err, magic, level));
-      // BROKER side: market closed / trading disabled by the server. Only the
-      // broker clears these, so the long backoff is right.
+ // BROKER side: market closed / trading disabled by the server. Only the
+ // broker clears these, so the long backoff is right.
       if (err == 133 || err == 132 || err == 4059 || err == 4112)
       {
-         g_srvBlockUntil = TimeGMT() + SrvBlockBackoffMin * 60;
-         LogAction("SRV_BLOCK", StringFormat("%s: server refused trading (err %d); pausing entries %d min", sym, err, SrvBlockBackoffMin));
+         g_srvBlockUntil = TimeGMT() + ServerBlock_Min * 60;
+         LogAction("SRV_BLOCK", StringFormat("%s: server refused trading (err %d); pausing entries %d min", sym, err, ServerBlock_Min));
       }
-      // LOCAL side: the terminal has not armed THIS EA yet. Seen ~1 s after every
-      // INIT that follows the properties dialog / an account change (2026-07-20
-      // 23:24:15 uninit 6, 2026-07-21 00:37:50 uninit 5) and it clears by itself
-      // in seconds. It used to share the 10-min SRV_BLOCK bucket, which cost 10
-      // minutes of trading after every restart. Short backoff instead.
+ // LOCAL side: the terminal has not armed THIS EA yet. Seen ~1 s after every
+ // INIT that follows the properties dialog / an account change (2026-07-20
+ // 23:24:15 uninit 6, 2026-07-21 00:37:50 uninit 5) and it clears by itself
+ // in seconds. It used to share the 10-min SRV_BLOCK bucket, which cost 10
+ // minutes of trading after every restart. Short backoff instead.
       else if (err == 4109 || err == 4110 || err == 4111)
       {
-         g_srvBlockUntil = TimeGMT() + LocalBlockBackoffSec;
+         g_srvBlockUntil = TimeGMT() + LocalBlock_Sec;
          LogAction("AT_LOCAL_BLOCK", StringFormat("%s: terminal not allowing this EA to trade yet (err %d); retrying in %d s",
-                   sym, err, LocalBlockBackoffSec));
+                   sym, err, LocalBlock_Sec));
       }
       return false;
    }
    return true;
 }
 
-// Direction bias: Gann HiLo Activator, EXACT match to Oracle_Bias() in the MT5
+// Direction bias: Gann HiLo Activator, EXACT match to Oracle_Bias in the original design
 // build. The HiLo side persists once flipped and IS the signal on its own -
 // NOT gated by the EMA (on M1 the fast HiLo and slow EMA disagree constantly;
 // requiring both killed every entry, bias=0, which is what this function did
-// until 2026-07-20 and is why it traded far less than the MT5 build in the
-// same market). The EMA is only a tie-breaker before the HiLo has any side yet
+// until 2026-07-20 and is why it traded far less than the original design in the
+// same market). The MA is only a tie-breaker before the HiLo has any side yet
 // (very first bars after (re)start).
-// Price vs EMA side (+1 above / -1 below / 0 flat-or-no-data). Only used by the
-// EMAGATE experiment: it decides whether a NEW basket may arm, never an add.
-int EmaSide()
+int SignalTF()  { return (Signal_TF > 0) ? Signal_TF : PERIOD_M1; }
+
+// Applied price for the MA. Oracle 2.0 runs it on the OPEN, not the close: its
+// input screen reads "Moving Average Price = Open price", and MT4's enum has
+// PRICE_CLOSE=0 / PRICE_OPEN=1. A project note had recorded InpMaPrice=1 as
+// "close", so this port filtered on a different price than Oracle for days.
+int MaPrice() { return (MA_AppliedPrice == 1) ? PRICE_OPEN : PRICE_CLOSE; }
+
+// Persist the HiLo side so a restart resumes the indicator's real state instead of
+// silently falling back to the MA (see GV_HILO_SIDE). Only writes on a flip.
+int g_prevHiloSide = 0;
+void SetHiloSide(int side)
 {
-   int tf = (Oracle_TF > 0) ? Oracle_TF : PERIOD_M1;
-   int method = (Oracle_MaMethod == 1) ? MODE_EMA : MODE_SMA;
-   double ma = iMA(g_sym, tf, Oracle_MaPeriod, 0, method, PRICE_CLOSE, 1);
-   double close = iClose(g_sym, tf, 1);
-   if (ma == 0 || close == 0) return 0;
-   return (close > ma) ? 1 : (close < ma ? -1 : 0);
+   if (side == g_prevHiloSide) return;
+   g_prevHiloSide = side;
+   GlobalVariableSet(GV_HILO_SIDE, side);
 }
 
-int g_prevHiloSide = 0;
+// HiLo-flip cadence gate. Each contiguous stretch where the raw
+// HiLo holds one side is one "epoch"; an engine may arm at most ONE new basket per
+// epoch, so after a basket TPs it does NOT re-arm until the HiLo flips. This is the
+// hypothesis for how Oracle keeps its cadence low with InpOpenOneCandle=false: it
+// waits for a fresh signal edge, it does not re-fire every tick the side is valid.
+int  g_hiloEpoch = 0;               // raw HiLo side of the current epoch (+1/-1, 0=none)
+bool g_armedThisEpoch[2] = {false, false};
+
+// Gann HiLo Activator. Oracle's "HILO Method = Exponential" means the high and low
+// bands are EMAs, not the arithmetic means this port used - an EMA weights the
+// most recent bar far more, so it flips sooner on a turn.
+// iMA on PRICE_HIGH / PRICE_LOW gives exactly that band with the configured method.
 int Bias()
 {
-   int tf = (Oracle_TF > 0) ? Oracle_TF : PERIOD_M1;
-   int method = (Oracle_MaMethod == 1) ? MODE_EMA : MODE_SMA;
-   double ma = iMA(g_sym, tf, Oracle_MaPeriod, 0, method, PRICE_CLOSE, 1);
-   double close = iClose(g_sym, tf, 1);
+   int method = (MA_Method == 1) ? MODE_EMA : MODE_SMA;
+   double ma = iMA(g_sym, SignalTF(), MA_Period, 0, method, MaPrice(), 1);
+   double close = iClose(g_sym, SignalTF(), 1);
    if (ma == 0 || close == 0) return 0;
-   double sumHi = 0, sumLo = 0;
-   for (int k = 1; k <= Oracle_HILOPeriod; k++)
-   {
-      sumHi += iHigh(g_sym, tf, k);
-      sumLo += iLow (g_sym, tf, k);
-   }
-   double hiAvg = sumHi / Oracle_HILOPeriod;
-   double loAvg = sumLo / Oracle_HILOPeriod;
-   if (close > hiAvg) g_prevHiloSide = 1;
-   else if (close < loAvg) g_prevHiloSide = -1;
-   int hilo = g_prevHiloSide;
-   if (Oracle_HILOInvert) hilo = -hilo;
-   if (hilo != 0) return hilo;                          // HiLo side is the signal
-   return (close < ma) ? -1 : (close > ma ? 1 : 0);      // start-up fallback: EMA side
+
+   int hiloMethod = (HiLo_Method == 1) ? MODE_EMA : MODE_SMA;
+   double hiAvg = iMA(g_sym, SignalTF(), HiLo_Period, 0, hiloMethod, PRICE_HIGH, 1);
+   double loAvg = iMA(g_sym, SignalTF(), HiLo_Period, 0, hiloMethod, PRICE_LOW,  1);
+   if (hiAvg == 0 || loAvg == 0) return 0;
+
+   if (close > hiAvg)      SetHiloSide(1);   // raw breakout / trend side
+   else if (close < loAvg) SetHiloSide(-1);
+   int raw = g_prevHiloSide;
+   if (raw == 0) raw = (close > ma) ? 1 : (close < ma ? -1 : 0);   // start-up: MA trend side
+
+ // ORACLE FADES THE MARKET. The entry is the OPPOSITE of the trend/breakout side.
+ // Measured live 2026-07-23 side-by-side (Oracle on account 73114915): Oracle BOUGHT
+ // a falling market (@4042.6 -> 4042.2) and SOLD the rebound (@4044.0), while
+ // Cerberus's old trend-following bias was BUY at the very same instant - exact
+ // opposites. Adds are unaffected (they always follow the existing basket
+ // direction, never Bias).
+   return -raw;
 }
 
 int g_prevN[2] = {0, 0};   // per-engine level count on the previous pass (cycle tally)
@@ -1014,9 +779,9 @@ void OracleOnEngine(int magic)
    int n, dir; double lots, avg, pl, last; datetime lt;
    Basket(sym, magic, n, dir, lots, avg, pl, last, lt);
 
-   // Basket went flat since the last pass -> one cycle completed. Book its
-   // realized P/L from the freshest closes of this magic (panel tally, GVs
-   // survive restarts just like the MT5 build's counters).
+ // Basket went flat since the last pass -> one cycle completed. Book its
+ // realized P/L from the freshest closes of this magic (panel tally, GVs
+ // survive restarts just's counters).
    int ei = EngineIdx(magic);
    if (n == 0 && g_prevN[ei] > 0)
    {
@@ -1040,49 +805,59 @@ void OracleOnEngine(int magic)
 
    if (!IsConnected() || AccountEquity() <= 0) return;
 
-   // Basket stop BEFORE soft blocks (a blocked hour must not delay the cut)
+ // Basket stop BEFORE soft blocks (a blocked hour must not delay the cut)
    if (n > 0 && EffBstop() > 0 && pl <= -EffBstop())
    {
       LogAction("BASKET_STOP", StringFormat("%s magic %d: floating %.2f <= -%.2f, cutting %d levels (%.2f lots)",
                 sym, magic, pl, EffBstop(), n, lots));
-      // Only SPEND the stop (hit counter + cooldown) if the cut really happened.
-      // Marking it on an announced-but-failed close left the basket running with
-      // its stop already used up (err 136, 2026-07-21 00:26:30).
+ // Only SPEND the stop (hit counter + cooldown) if the cut really happened.
+ // Marking it on an announced-but-failed close left the basket running with
+ // its stop already used up (err 136, 2026-07-21 00:26:30).
       if (!CloseBasket(sym, magic, "basket stop"))
       {
          LogAction("BASKET_STOP_FAIL", StringFormat("%s magic %d: cut incomplete, retrying next pass", sym, magic));
          return;
       }
       g_bstopHitsToday++;
-      if (Oracle_BasketStopCooldownMin > 0)
-         g_bstopUntil[EngineIdx(magic)] = TimeGMT() + Oracle_BasketStopCooldownMin * 60;
+      if (BasketStop_CooldownMin > 0)
+         g_bstopUntil[EngineIdx(magic)] = TimeGMT() + BasketStop_CooldownMin * 60;
       return;
    }
 
-   // Soft blocks for NEW entries/adds
-   if (g_paused || InNewsWindow() || HourBlocked() || SchedBlocked() || TimeGMT() < g_volPauseUntil ||
-       TimeGMT() < g_srvBlockUntil || ClosedOrWarmingUp() || InFridayPreClose()) return;
+ // Soft blocks for NEW entries/adds. v2.0 dropped the hour filter, the scheduler,
+ // the rule C pause and the Friday pre-close from this gate - what is left either
+ // protects the ORDER (spread, server backoff, market closed) or is the news
+ // window, which Oracle also respects for entries.
+   if (g_paused || InNewsWindow() || TimeGMT() < g_srvBlockUntil || ClosedOrWarmingUp()) return;
 
-   bool spreadOK = (Oracle_MaxSpread <= 0) || (MarketInfo(sym, MODE_SPREAD) <= Oracle_MaxSpread);
+   bool spreadOK = (MaxSpread_Points <= 0) || (MarketInfo(sym, MODE_SPREAD) <= MaxSpread_Points);
 
    if (n == 0)
    {
       if (TimeGMT() < g_bstopUntil[EngineIdx(magic)]) return;
       if (!spreadOK) return;
       int bias = Bias();
-      // One side per engine when both engines are on (Oracle 2.0 behavior);
-      // a lone engine trades both sides, one basket at a time.
+ // One side per engine when both are on, matching Oracle 2.0 as MEASURED:
+ // magic 7799 takes SELL and 9977 takes BUY (EngineSide). A lone engine
+ // trades both sides, one basket at a time.
       int side = 0;
-      if (Oracle_EngineA && Oracle_EngineB) side = (magic == MAGIC_A) ? 1 : -1;
+      if (Engine_A_Sell && Engine_B_Buy) side = EngineSide(magic);
       if (bias == 0 || (side != 0 && bias != side)) return;
-      // EMAGATE: the HiLo alone always carries a side, so a closed basket re-arms
-      // instantly. Requiring the EMA to agree gates only the NEW basket (adds keep
-      // using the HiLo direction). Same switch as the MT5 build.
-      if (EmaGateOn() && EmaSide() != bias) return;
-      if (RegimeBlocked(bias)) return;   // do not arm a grid against a strong H1 trend
+
+ // Cadence gate: one new basket per HiLo epoch. A flip of the raw HiLo side
+ // (g_prevHiloSide, freshly set by Bias above) opens a new epoch and clears
+ // both engines' arm flags; without a flip, a closed basket does NOT re-arm.
+      if (g_prevHiloSide != 0 && g_prevHiloSide != g_hiloEpoch)
+      {
+         g_hiloEpoch = g_prevHiloSide;
+         g_armedThisEpoch[0] = false; g_armedThisEpoch[1] = false;
+      }
+      if (g_armedThisEpoch[ei]) return;   // already armed this epoch, wait for the next flip
+
       if (OpenLevel(sym, magic, bias, 0))
       {
-         g_lastAddTime[EngineIdx(magic)] = TimeCurrent();   // throttle the first add too
+         g_armedThisEpoch[ei] = true;
+         g_lastAddTime[ei] = TimeCurrent();   // throttle the first add too
          SetBasketTP(sym, magic);
       }
       return;
@@ -1091,13 +866,13 @@ void OracleOnEngine(int magic)
    bool depthOK = (n < EffMaxLevels());
    double adverse = (dir < 0) ? (bid - last) : (last - bid);
    double nextLot = EffLot() * MathPow(EffFactor(), n);
-   // Throttle: the timer AND ticks run the grid, so without a minimum gap a burst
-   // of ticks in one second adds several levels before the fresh order is visible,
-   // stacking them pips apart and violating GridSize. One add per Oracle_MinSecsBetweenAdds.
+ // Throttle: the timer AND ticks run the grid, so without a minimum gap a burst
+ // of ticks in one second adds several levels before the fresh order is visible,
+ // stacking them pips apart and violating GridSize. One add per MinSecs_BetweenAdds.
    int ei2 = EngineIdx(magic);
-   bool addThrottled = (Oracle_MinSecsBetweenAdds > 0 &&
-                        TimeCurrent() - g_lastAddTime[ei2] < Oracle_MinSecsBetweenAdds);
-   if (spreadOK && depthOK && !addThrottled && !RegimeBlocked(dir) && adverse >= EffGrid() * pip && (lots + nextLot) <= Oracle_MaxLot)
+   bool addThrottled = (MinSecs_BetweenAdds > 0 &&
+                        TimeCurrent() - g_lastAddTime[ei2] < MinSecs_BetweenAdds);
+   if (spreadOK && depthOK && !addThrottled && adverse >= EffGrid() * pip && (lots + nextLot) <= MaxLot_Total)
    {
       if (OpenLevel(sym, magic, dir, n))
       {
@@ -1110,12 +885,12 @@ void OracleOnEngine(int magic)
 void OracleOnAll()
 {
    if (!g_oracleOn) return;
-   if (Oracle_EngineA) OracleOnEngine(MAGIC_A);
-   if (Oracle_EngineB) OracleOnEngine(MAGIC_B);
+   if (Engine_A_Sell) OracleOnEngine(MAGIC_A);
+   if (Engine_B_Buy) OracleOnEngine(MAGIC_B);
 }
 
 //==================================================================
-// Overrides / presets (SYMBOL=TP,GRID,LOT,FACTOR,MAXLEV[,BSTOP])
+// Hot overrides (SET / BSTOP commands) - persisted in GVs, survive a restart
 //==================================================================
 void SaveOverridesToGV()
 {
@@ -1125,7 +900,6 @@ void SaveOverridesToGV()
    if (g_ovFactor > 0) GlobalVariableSet(GV_OV_FACTOR, g_ovFactor);
    if (g_ovMaxLev >= 0) GlobalVariableSet(GV_OV_MAXLEV, g_ovMaxLev);
    if (g_ovBstop >= 0) GlobalVariableSet(GV_OV_BSTOP, g_ovBstop);
-   if (g_ovEmaGate >= 0) GlobalVariableSet(GV_OV_EMAGATE, g_ovEmaGate);
 }
 
 void LoadOverridesFromGV()
@@ -1136,20 +910,19 @@ void LoadOverridesFromGV()
    if (GlobalVariableCheck(GV_OV_FACTOR)) g_ovFactor = GlobalVariableGet(GV_OV_FACTOR);
    if (GlobalVariableCheck(GV_OV_MAXLEV)) g_ovMaxLev = (int)GlobalVariableGet(GV_OV_MAXLEV);
    if (GlobalVariableCheck(GV_OV_BSTOP))  g_ovBstop  = GlobalVariableGet(GV_OV_BSTOP);
-   if (GlobalVariableCheck(GV_OV_EMAGATE)) g_ovEmaGate = (int)GlobalVariableGet(GV_OV_EMAGATE);
 }
 
 // Re-anchor the Rule E daily baseline. Shared by the RESETDAY command and the
-// panel button so both behave identically (MT5 parity: DoResetDay).
+// panel button so both behave identically (DoResetDay).
 void DoResetDay(string via)
 {
    GlobalVariableSet(GV_DAYBAL, AccountBalance());
    GlobalVariableSet(GV_DAYDATE, (double)(datetime)StringToTime(TimeToString(TimeGMT(), TIME_DATE)));
    LogAction("RESETDAY", StringFormat("Daily baseline re-anchored to $%.2f%s", AccountBalance(), via));
-   // Re-anchoring the day while rule E holds the pause used to leave the EA silent:
-   // baseline fresh, AutoTrading still off, and nothing in the log to explain it
-   // (there is no error - it is paused on purpose). So RESETDAY now finishes the job
-   // it implies and lifts a GUARDIAN pause. A HUMAN pause is left alone, but says so.
+ // Re-anchoring the day while rule E holds the pause used to leave the EA silent:
+ // baseline fresh, AutoTrading still off, and nothing in the log to explain it
+ // (there is no error - it is paused on purpose). So RESETDAY now finishes the job
+ // it implies and lifts a GUARDIAN pause. A HUMAN pause is left alone, but says so.
    if (!GlobalVariableCheck(GV_PAUSE)) return;
    if ((int)GlobalVariableGet(GV_PAUSE) == 1)
    {
@@ -1165,64 +938,8 @@ void DoResetDay(string via)
 
 string ConfigLine()
 {
-   return StringFormat("%s TP=%.0f GRID=%.0f LOT=%.2f FACTOR=%.2f MAXLEV=%d BSTOP=%.2f EMAGATE=%s",
-                       g_sym, EffTP(), EffGrid(), EffLot(), EffFactor(), EffMaxLev(), EffBstop(),
-                       EmaGateOn() ? "ON" : "OFF");
-}
-
-// Preset field order MUST match src-mt5/Cerberus.mq5 exactly - both platforms
-// share the same symbol_presets.txt file: SYMBOL=TP,GRID,LOT,FACTOR,MAXLEV,BSTOP.
-void SavePreset()
-{
-   string newLine = StringFormat("%s=%.0f,%.0f,%.2f,%.2f,%d,%.2f",
-                    g_sym, EffTP(), EffGrid(), EffLot(), EffFactor(), EffMaxLev(), EffBstop());
-   string keep[]; int nk = 0;
-   int rh = FileOpen(PRESETS_FILE, FILE_READ | FILE_TXT | FILE_ANSI);
-   if (rh != INVALID_HANDLE)
-   {
-      while (!FileIsEnding(rh))
-      {
-         string ln = FileReadString(rh);
-         if (StringLen(ln) == 0) continue;
-         if (StringFind(ln, g_sym + "=") == 0) continue;
-         ArrayResize(keep, nk + 1); keep[nk++] = ln;
-      }
-      FileClose(rh);
-   }
-   int wh = FileOpen(PRESETS_FILE, FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if (wh == INVALID_HANDLE) { LogAction("WARNING", "SAVEPRESET: cannot write file"); return; }
-   for (int i = 0; i < nk; i++) FileWriteString(wh, keep[i] + "\r\n");
-   FileWriteString(wh, newLine + "\r\n");
-   FileClose(wh);
-   LogAction("SAVEPRESET", newLine);
-}
-
-bool LoadPreset(string sym)
-{
-   int rh = FileOpen(PRESETS_FILE, FILE_READ | FILE_TXT | FILE_ANSI);
-   if (rh == INVALID_HANDLE) { LogAction("WARNING", "PRESET: no " + PRESETS_FILE); return false; }
-   string found = "";
-   while (!FileIsEnding(rh))
-   {
-      string ln = FileReadString(rh);
-      if (StringFind(ln, sym + "=") == 0) { found = ln; break; }
-   }
-   FileClose(rh);
-   if (found == "") { LogAction("WARNING", "PRESET: no entry for " + sym); return false; }
-   // TP,GRID,LOT,FACTOR,MAXLEV,BSTOP - same layout as the MT5 build. A legacy
-   // 5-field line (no FACTOR) is still readable: field 4 becomes MAXLEV as
-   // before and FACTOR is simply left unset (falls back to the input default).
-   string kv[]; if (StringSplit(found, '=', kv) < 2) return false;
-   string v[]; int nv = StringSplit(kv[1], ',', v);
-   if (nv >= 1 && StringToDouble(v[0]) > 0) g_ovTP     = StringToDouble(v[0]);
-   if (nv >= 2 && StringToDouble(v[1]) > 0) g_ovGrid   = StringToDouble(v[1]);
-   if (nv >= 3 && StringToDouble(v[2]) > 0) g_ovLot    = StringToDouble(v[2]);
-   if (nv >= 4 && StringToDouble(v[3]) > 0) g_ovFactor = StringToDouble(v[3]);
-   if (nv >= 5)                             g_ovMaxLev = (int)StringToInteger(v[4]);
-   if (nv >= 6)                             g_ovBstop  = MathMax(0, StringToDouble(v[5]));
-   SaveOverridesToGV();
-   LogAction("PRESET", "loaded " + found + " -> " + ConfigLine());
-   return true;
+   return StringFormat("%s TP=%.0f GRID=%.0f LOT=%.2f FACTOR=%.2f MAXLEV=%d BSTOP=%.2f ENTRY=FADE",
+                       g_sym, EffTP(), EffGrid(), EffLot(), EffFactor(), EffMaxLev(), EffBstop());
 }
 
 //==================================================================
@@ -1245,22 +962,10 @@ void ProcessCommand()
    else if (cmd == "RESUME")  { g_paused = false; GlobalVariableDel(GV_PAUSE); GlobalVariableDel(GV_GUARD); SetAutoTrading(true); LogAction("RESUME", "manual pause lifted"); }
    else if (cmd == "CLOSEALL") CloseEverything("CLOSEALL command");
    else if (cmd == "RESETDAY") DoResetDay("");
-   else if (StringFind(cmd, "EMAGATE") == 0)
-   {
-      string ep[];
-      if (StringSplit(cmd, ' ', ep) >= 2 && (ep[1] == "ON" || ep[1] == "OFF"))
-      {
-         g_ovEmaGate = (ep[1] == "ON") ? 1 : 0;
-         SaveOverridesToGV();
-         LogAction("EMAGATE", StringFormat("new-basket EMA gate %s by command", ep[1]));
-      }
-      else LogAction("WARNING", "syntax: EMAGATE ON|OFF");
-   }
    else if (cmd == "ORACLE_ON")  { g_oracleOn = true;  GlobalVariableSet(GV_ORACLE_ON, 1); LogAction("ORACLE", "engine ON"); }
    else if (cmd == "ORACLE_OFF") { g_oracleOn = false; GlobalVariableSet(GV_ORACLE_ON, 0); LogAction("ORACLE", "engine OFF"); }
    else if (cmd == "CONFIG")     LogAction("CONFIG", ConfigLine());
    else if (cmd == "PANELDUMP")  PanelDump();
-   else if (cmd == "SAVEPRESET") SavePreset();
    else if (StringFind(cmd, "BSTOP") == 0)
    {
       string parts[]; int np = StringSplit(raw, ' ', parts);
@@ -1271,10 +976,6 @@ void ProcessCommand()
          LogAction("BSTOP", (g_ovBstop > 0) ? StringFormat("basket stop = %.0f USD by command", g_ovBstop) : "basket stop OFF by command");
       }
       else LogAction("WARNING", "syntax: BSTOP <usd> (0 = off)");
-   }
-   else if (StringFind(cmd, "PRESET") == 0)
-   {
-      string parts[]; if (StringSplit(raw, ' ', parts) >= 2) LoadPreset(parts[1]);
    }
    else if (cmd == "AT_ON" || cmd == "AT_OFF")
    {
@@ -1292,33 +993,6 @@ void ProcessCommand()
          LogAction("TEST", StringFormat("fake USD event injected %d min ahead", mins));
       }
    }
-   else if (StringFind(cmd, "SYMBOL") == 0)
-   {
-      string parts[];
-      if (StringSplit(raw, ' ', parts) >= 2)
-      {
-         CloseBasket(g_sym, MAGIC_A, "symbol switch");
-         CloseBasket(g_sym, MAGIC_B, "symbol switch");
-         g_sym = parts[1];
-         SymbolSelect(g_sym, true);
-         g_prevHiloSide = 0; g_openedAt = 0; g_sawClosed = false;
-         LogAction("SYMBOL", "now trading " + g_sym + " (basket flattened)");
-      }
-   }
-   else if (StringFind(cmd, "BUY") == 0 || StringFind(cmd, "SELL") == 0)
-   {
-      string parts[]; int np = StringSplit(raw, ' ', parts);
-      if (np >= 3)
-      {
-         string ms = parts[1]; double ml = StringToDouble(parts[2]);
-         SymbolSelect(ms, true); RefreshRates();
-         int mt = (StringFind(cmd, "BUY") == 0) ? OP_BUY : OP_SELL;
-         double mp = (mt == OP_BUY) ? MarketInfo(ms, MODE_ASK) : MarketInfo(ms, MODE_BID);
-         int mtk = OrderSend(ms, mt, ml, mp, 300, 0, 0, "Cerberus4 manual", 777999, 0, clrYellow);
-         LogAction("MANUAL", StringFormat("%s %s %.2f -> %s", cmd, ms, ml, mtk > 0 ? "#" + IntegerToString(mtk) : "FAILED err=" + IntegerToString(GetLastError())));
-      }
-      else LogAction("WARNING", "syntax: BUY <sym> <lots> / SELL <sym> <lots>");
-   }
    else if (StringFind(cmd, "SET") == 0)
    {
       string parts[]; int np = StringSplit(raw, ' ', parts);
@@ -1327,8 +1001,8 @@ void ProcessCommand()
          string kvp[]; if (StringSplit(parts[i], '=', kvp) != 2) continue;
          string key = kvp[0]; StringToUpper(key);
          double val = StringToDouble(kvp[1]);
-         // Homologated to MT5: assign the value as-is (no val>0 filter) and warn
-         // on unknown keys, so SET behaves identically on both platforms.
+ //: assign the value as-is (no val>0 filter) and warn
+ // on unknown keys, so SET behaves identically on both platforms.
          if      (key == "TP")     g_ovTP     = val;
          else if (key == "GRID")   g_ovGrid   = val;
          else if (key == "LOT")    g_ovLot    = val;
@@ -1344,10 +1018,10 @@ void ProcessCommand()
 }
 
 //==================================================================
-// Closed-history tally - MQL4 order-history equivalent of the MT5 build's
-// TallyClosedHistory(): same fields (closed/wins/losses/realized/closedToday/
+// Closed-history tally - MQL4 order-history equivalent of the original design's
+// TallyClosedHistory: same fields (closed/wins/losses/realized/closedToday/
 // avgWin/avgLoss), same "win if p>=0" rule, same "today" cutoff at 00:00 GMT.
-// MT4 has no deal ticket model, so this walks OrdersHistoryTotal() filtered to
+// MT4 has no deal ticket model, so this walks OrdersHistoryTotal filtered to
 // our two magics on the traded symbol instead of HistoryDealGetTicket.
 //==================================================================
 double g_peakEquity = 0;
@@ -1380,20 +1054,24 @@ void WriteStatus()
    if (TimeGMT() - g_lastStatus < 30) return;
    g_lastStatus = TimeGMT();
    string s = "{";
-   s += "\"ea\":\"Cerberus4\",\"version\":\"1.16\",";
+   s += "\"ea\":\"Cerberus4\",\"version\":\"2.00\",";
    s += "\"gmt\":\"" + TimeToString(TimeGMT(), TIME_DATE | TIME_SECONDS) + "\",";
-   s += "\"status\":\"" + (g_paused ? "PAUSED_MANUAL" : (TimeGMT() < g_volPauseUntil ? "PAUSED_VOLATILITY" : (InNewsWindow() ? "PAUSED_NEWS" : "RUNNING"))) + "\",";
+ // AT_OFF must outrank RUNNING. The terminal remembers the global AutoTrading
+ // button across restarts, so a button left off by a PREVIOUS build silently
+ // gates the whole strategy - and this field used to keep publishing "RUNNING"
+ // while nothing could trade (seen 2026-07-23: 13 min of zero orders with the
+ // JSON claiming RUNNING; only the panel's "AutoTrading: OFF" gave it away).
+   s += "\"status\":\"" + (!AutoTradingOn() ? "AT_OFF" :
+                          (g_paused ? "PAUSED_MANUAL" :
+                          (InNewsWindow() ? "PAUSED_NEWS" : "RUNNING"))) + "\",";
+   s += StringFormat("\"autotrading\":%s,", AutoTradingOn() ? "true" : "false");
+ // Hour band and weekly-close warning are DISPLAY ONLY: published so the panel and
+ // the compare tooling can show them, explicitly flagged as non-blocking.
+   s += StringFormat("\"hour_risk\":{\"band\":\"%s\",\"level\":%d,\"blocks\":false},",
+                     RiskName(HourRisk(NowMinUTC())), HourRisk(NowMinUTC()));
+   s += StringFormat("\"session_warning\":%s,", InSessionWarning() ? "true" : "false");
    s += StringFormat("\"config\":{\"symbol\":\"%s\",\"tp\":%.0f,\"grid\":%.0f,\"lot\":%.2f,\"maxlev\":%d},", g_sym, EffTP(), EffGrid(), EffLot(), EffMaxLev());
    s += StringFormat("\"basket_stop\":{\"usd\":%.0f,\"hits_today\":%d},", EffBstop(), g_bstopHitsToday);
-   // "regime_blocked" is the flat field MT5 publishes - kept identical so the
-   // compare panel can read both terminals with one parser. The "regime" object
-   // is the extra MT4 needs: eval_age_s exposes a STALE verdict (see g_regimeEvalAt).
-   s += StringFormat("\"regime_blocked\":%s,", g_regimeBlocked ? "true" : "false");
-   s += StringFormat("\"regime\":{\"filter\":%s,\"blocked\":%s,\"eval_age_s\":%d,\"dir\":%d},",
-                     Oracle_UseRegimeFilter ? "true" : "false",
-                     g_regimeBlocked ? "true" : "false",
-                     (g_regimeEvalAt > 0) ? (int)(TimeGMT() - g_regimeEvalAt) : -1,
-                     g_regimeDir);
    s += "\"feed\":\"" + (FeedOk ? "OK" : "disk cache") + "\",";
    s += StringFormat("\"events_loaded\":%d,", g_eventsLoaded);
    double eq = AccountEquity();
@@ -1438,7 +1116,7 @@ void WriteStatus()
 }
 
 //==================================================================
-// Panel (CB_ prefix) — EXACT transcription of the MT5 build's panel:
+// Panel (CB_ prefix) — EXACT transcription of the original design's panel:
 // same constants, colors, wording and layout, line by line.
 //==================================================================
 #define PANEL_X     10
@@ -1529,7 +1207,7 @@ string PanelFit(string s)
 string RiskName(int r)
 {
    if (r >= 3) return "VERY HIGH";
-   if (r == 2) return "MEDIUM";   // homologated to MT5 (was "HIGH")
+   if (r == 2) return "MEDIUM";   //
    if (r == 1) return "LOW";
    return "VERY LOW";
 }
@@ -1556,11 +1234,9 @@ void PanelUpdate()
    color cDown = C'230,90,90';
    color cWarn = C'240,180,60';
 
-   // --- Guardian state
+ // --- Guardian state
    if (manual)           SetLine(line++, "# CERBERUS: MANUAL PAUSE", clrOrange);
-   else if (inWin)       SetLine(line++, PanelFit("# CERBERUS: NEWS PAUSE: " + evName), clrTomato);
-   else if (nowG < g_volPauseUntil)
-                         SetLine(line++, PanelFit("# CERBERUS: VOLATILITY PAUSE only " + g_sym), clrTomato);
+   else if (inWin)       SetLine(line++, PanelFit("# CERBERUS: NEWS - no new entries: " + evName), clrTomato);
    else                  SetLine(line++, "# CERBERUS: RUNNING", clrLightGreen);
 
    bool at = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
@@ -1569,14 +1245,13 @@ void PanelUpdate()
            g_lastFeedOk > 0 ? " (" + FmtCountdown((int)(nowG - g_lastFeedOk)) + ")" : ""),
            at ? clrLightGreen : clrTomato);
 
-   // --- Hour window (gold risk table, Colombia = UTC-5)
+ // --- Hour window (gold risk table, Colombia = UTC-5)
    {
       int hm = NowMinUTC();
       int hr = HourRisk(hm);
       int colMin = (hm + 1140) % 1440;
       int chg = MinutesToRiskChange();
-      string tag = (UseHourFilter && hr >= HourBlockRisk) ? " >> NO ENTRIES" :
-                   (!UseHourFilter ? " (filter OFF)" : "");
+      string tag = " (info only)";   // v2.0: the band never blocks an entry
       SetLine(line++, StringFormat("Window %02d:%02d COL (%02d:%02d UTC): %s%s %s",
               colMin / 60, colMin % 60, hm / 60, hm % 60, RiskName(hr), tag,
               StringFormat("(%dh%02dm)", chg / 60, chg % 60)),
@@ -1584,7 +1259,7 @@ void PanelUpdate()
    }
    SetLine(line++, "---------------------------------------------------------");
 
-   // --- Next news event
+ // --- Next news event
    int nextIdx = -1;
    for (int i = 0; i < g_eventsLoaded; i++)
       if (g_eventTimes[i] > nowG && (nextIdx == -1 || g_eventTimes[i] < g_eventTimes[nextIdx]))
@@ -1592,8 +1267,8 @@ void PanelUpdate()
    if (nextIdx >= 0)
    {
       int toEvent = (int)(g_eventTimes[nextIdx] - nowG);
-      int toPause = toEvent - MinutesBefore * 60;
-      SetLine(line++, PanelFit("NEXT: USD " + g_evTitle[nextIdx]), clrKhaki);
+      int toPause = toEvent - News_MinutesBefore * 60;
+      SetLine(line++, PanelFit("NEXT: " + g_evTitle[nextIdx]), clrKhaki);
       SetLine(line++, StringFormat("  in %s (pause in %s)", FmtCountdown(toEvent), FmtCountdown(toPause)), clrKhaki);
    }
    else
@@ -1602,28 +1277,13 @@ void PanelUpdate()
    }
    SetLine(line++, "---------------------------------------------------------");
 
-   // --- ORACLE: header + 1-2 lines per engine basket
+ // --- ORACLE: header + 1-2 lines per engine basket
    {
       SetLine(line++, StringFormat("ORACLE %s%d PERIOD_M%d [%s] TP%.0f grid%.0f lot%.2f x%.1f  eng %s%s",
-              (Oracle_MaMethod == 1) ? "EMA" : "SMA", Oracle_MaPeriod, (Oracle_TF > 0) ? Oracle_TF : 1,
+              (MA_Method == 1) ? "EMA" : "SMA", MA_Period, (Signal_TF > 0) ? Signal_TF : 1,
               g_oracleOn ? "ON" : "OFF", EffTP(), EffGrid(), EffLot(), EffFactor(),
-              Oracle_EngineA ? "A" : "-", Oracle_EngineB ? "B" : "-"),
+              Engine_A_Sell ? "A" : "-", Engine_B_Buy ? "B" : "-"),
               g_oracleOn ? clrLightGreen : cDim);
-
-      // Regime-filter state. Until this line existed there was NO way from MT4 to
-      // tell a filter that never fires from one blocking half the day. The age is
-      // shown because the verdict only refreshes when the entry gate reaches it.
-      if (!Oracle_UseRegimeFilter)
-         SetLine(line++, "REGIME H1: filter OFF", cDim);
-      else if (g_regimeEvalAt == 0)
-         SetLine(line++, StringFormat("REGIME H1: ON (ADX>%d, %.0fxATR) - not evaluated yet",
-                 Oracle_RegimeADX, Oracle_RegimeATRDist), cDim);
-      else
-         SetLine(line++, StringFormat("REGIME H1: %s for %s (%ds ago, ADX>%d or %.0fxATR)",
-                 g_regimeBlocked ? ">> BLOCKING entries" : "clear",
-                 (g_regimeDir > 0) ? "BUY" : "SELL",
-                 (int)(TimeGMT() - g_regimeEvalAt), Oracle_RegimeADX, Oracle_RegimeATRDist),
-                 g_regimeBlocked ? clrTomato : clrLightGreen);
 
       double exposure = 0;
       double pip = StratPip(g_sym);
@@ -1636,17 +1296,13 @@ void PanelUpdate()
          exposure += totLots;
          if (n == 0)
          {
-            if (nowG < g_volPauseUntil)
-               SetLine(line++, StringFormat("%-8s e%d VOL PAUSE (rule C)", g_sym, e), cWarn);
-            else if (HourBlocked())
-               SetLine(line++, StringFormat("%-8s e%d HOUR BLOCK %s", g_sym, e, RiskName(HourRisk(NowMinUTC()))), cWarn);
-            else
-            {
-               int bias = Bias();
-               SetLine(line++, StringFormat("%-8s e%d  no basket  bias %s", g_sym, e,
-                       bias > 0 ? "BUY" : bias < 0 ? "SELL" : "-"),
-                       bias > 0 ? cUp : bias < 0 ? cDown : cDim);
-            }
+            int bias = Bias();
+            int mySide = (Engine_A_Sell && Engine_B_Buy) ? EngineSide(engines[e]) : 0;
+            string waiting = (mySide != 0 && bias != mySide) ? "  waiting" : "";
+            SetLine(line++, StringFormat("%-8s e%d(%s) no basket  bias %s%s", g_sym, e,
+                    mySide > 0 ? "BUY" : mySide < 0 ? "SELL" : "both",
+                    bias > 0 ? "BUY" : bias < 0 ? "SELL" : "-", waiting),
+                    bias > 0 ? cUp : bias < 0 ? cDown : cDim);
          }
          else
          {
@@ -1664,7 +1320,7 @@ void PanelUpdate()
    }
    SetLine(line++, "---------------------------------------------------------");
 
-   // --- Last closed trades
+ // --- Last closed trades
    SetLine(line++, "LAST TRADES:", clrSilver);
    int shownH = 0, dayN = 0;
    datetime day0 = iTime(Symbol(), PERIOD_D1, 0);
@@ -1689,23 +1345,25 @@ void PanelUpdate()
    if (shownH == 0) SetLine(line++, "  (no closed trades)", clrGray);
    SetLine(line++, "---------------------------------------------------------");
 
-   // Day P/L MEASURED LIKE RULE E: equity vs baseline (RESETDAY re-anchors).
+ // Day P/L MEASURED LIKE RULE E: equity vs baseline (RESETDAY re-anchors).
    double dayBase = GlobalVariableCheck(GV_DAYBAL) ? GlobalVariableGet(GV_DAYBAL) : AccountBalance();
    double dayEq = AccountEquity() - dayBase;
    SetLine(line++, StringFormat("DAY P/L (since reset): $%+.2f  |  %d trades today", dayEq, dayN),
            dayEq >= 0 ? clrLightGreen : clrTomato);
-   SetLine(line++, StringFormat("Brakes (guardian): day -%.0f | pos -%.0f | rule C closes",
-           MaxDailyLossUSD, MaxLossPerTradeUSD), cDim);
+   SetLine(line++, StringFormat("Brakes: day -%.0f | basket %s%s", DailyLoss_USD,
+           EffBstop() > 0 ? StringFormat("-%.0f", EffBstop()) : "OFF",
+           InSessionWarning() ? "  | WEEKLY CLOSE SOON (not flattening)" : ""), cDim);
 
-   // --- Account
+ // --- Account. Margin level is INFORMATIONAL in v2.0: rule B was removed, so
+ // nothing acts on it (colour turns amber under 200% purely as a heads-up).
    double ml = (AccountMargin() > 0) ? AccountEquity() / AccountMargin() * 100.0 : 999999;
    color mlClr = clrLightGreen;
-   if (MinMarginLevelPct > 0 && ml < MinMarginLevelPct * 1.25) mlClr = clrTomato;
+   if (ml < 200.0) mlClr = cWarn;
    SetLine(line++, StringFormat("Equity: %.2f  Free: %.2f  Margin: %s",
            AccountEquity(), AccountFreeMargin(),
            ml >= 999999 ? "-" : StringFormat("%.0f%%", ml)), mlClr);
 
-   // --- Last action
+ // --- Last action
    SetLine(line++, PanelFit("Last action: " + g_lastAction), clrSilver);
 
    for (int blank = line; blank < PANEL_LINES; blank++) SetLine(blank, " ");
@@ -1730,7 +1388,7 @@ void PanelFitTo(int used)
 }
 
 // PANELDUMP command: write every panel line to panel_dump.txt so the clone can
-// be diffed against the MT5 layout without a screenshot.
+// be diffed against the original design layout without a screenshot.
 void PanelDump()
 {
    int h = FileOpen("panel_dump.txt", FILE_WRITE | FILE_TXT | FILE_ANSI);
@@ -1759,7 +1417,7 @@ void PanelDelete()
 //==================================================================
 int OnInit()
 {
-   string syms = Oracle_Symbols;
+   string syms = Symbol_Traded;
    string list[]; int nl = StringSplit(syms, ',', list);
    g_sym = (nl > 0) ? list[0] : Symbol();
    if (g_sym == "") g_sym = Symbol();
@@ -1768,21 +1426,29 @@ int OnInit()
    g_paused = (GlobalVariableCheck(GV_PAUSE) && GlobalVariableGet(GV_PAUSE) > 0);
    g_oracleOn = !(GlobalVariableCheck(GV_ORACLE_ON) && GlobalVariableGet(GV_ORACLE_ON) == 0);
    g_bstopUntil[0] = 0; g_bstopUntil[1] = 0;
-   g_peakEquity = AccountEquity();   // seed drawdown baseline, same as the MT5 build
+   g_peakEquity = AccountEquity();   // seed drawdown baseline
    LoadOverridesFromGV();
+ // Restore the HiLo side. Without this the stateful indicator restarted neutral
+ // on every OnInit and the bias silently fell through to the MA until the first
+ // band cross - a different regime after each terminal restart, invisible in the log.
+   if (GlobalVariableCheck(GV_HILO_SIDE)) g_prevHiloSide = (int)GlobalVariableGet(GV_HILO_SIDE);
 
-   if (StringLen(TestEventMinutes) > 0)
+   if (StringLen(News_TestMinutes) > 0)
    {
-      int tmins = (int)StringToInteger(TestEventMinutes);
+      int tmins = (int)StringToInteger(News_TestMinutes);
       if (tmins > 0) { g_nextEvent = TimeGMT() + tmins * 60; g_nextEventTxt = "USD TEST INPUT"; }
    }
 
    PanelCreate();
    EventSetTimer(5);
-   LogAction("INIT", StringFormat("Cerberus4 v1.16 on [%s] (%s%d + HILO%d tf%d, effective %s, engines %s%s)",
-             g_sym, (Oracle_MaMethod == 1) ? "EMA" : "SMA", Oracle_MaPeriod, Oracle_HILOPeriod,
-             (Oracle_TF > 0) ? Oracle_TF : 1, ConfigLine(),
-             Oracle_EngineA ? "A" : "-", Oracle_EngineB ? "B" : "-"));
+   LogAction("INIT", StringFormat("Cerberus4 v2.00 on [%s] (%s%d/%s + HILO%d/%s tf%d, effective %s, engines %s%s = A:SELL B:BUY, hiloSide %d, new basket on HiLo flip)",
+             g_sym, (MA_Method == 1) ? "EMA" : "SMA", MA_Period,
+             (MaPrice() == PRICE_OPEN) ? "open" : "close", HiLo_Period,
+             (HiLo_Method == 1) ? "EMA" : "SMA",
+             (Signal_TF > 0) ? Signal_TF : 1, ConfigLine(),
+             Engine_A_Sell ? "A" : "-", Engine_B_Buy ? "B" : "-", g_prevHiloSide));
+   LogAction("GUARD", StringFormat("v2.0 nets: dailyLoss=%.0f basketStop=%.0f | rules A/B/C/D, news-close, pre-close flatten and scheduler REMOVED; hour band + weekly close are display only",
+             DailyLoss_USD, EffBstop()));
    RefreshFeed();
    return INIT_SUCCEEDED;
 }
@@ -1799,13 +1465,22 @@ void OnTimer()
 {
    ProcessCommand();
    RefreshFeed();
-   EvaluateNewsState();          // news: close all + AT off on entering a window (homologated to MT5)
-   CheckVolatilitySpike();       // rule C ATR spike / window: once per closed M1 bar
-   CheckSpikePipsLive();         // rule C fixed-pips: intrabar (no-op unless VolSpikePips>0)
-   ApplyDefenseRules();
-   PreCloseFlatten();
-   // With AutoTrading off (news window, manual pause, rule E, scheduler HARD) the
-   // strategy does not run - same gate as MT5's `if (AutoTradingOn() && OracleOn())`.
+   EvaluateNewsState();          // v2.0: tracking only - never closes, never touches AT
+   ApplyDefenseRules();          // v2.0: rule E only
+ // Say it out loud when the global button is what is stopping us. Silence here
+ // is indistinguishable from "the market gave no signal" and cost 13 minutes of
+ // a soak on 2026-07-23. Throttled to once a minute; not logged while a pause
+ // owns the button on purpose (manual / rule E), which already has its own line.
+   if (!AutoTradingOn() && !g_paused)
+   {
+      static datetime lastAtOffLog = 0;
+      if (TimeGMT() - lastAtOffLog >= 60)
+      {
+         lastAtOffLog = TimeGMT();
+         LogAction("AT_OFF", "global AutoTrading button is OFF - the strategy is idle. Send AT_ON (the terminal remembers this button across restarts).");
+      }
+   }
+ // With AutoTrading off (manual pause, rule E) the strategy does not run.
    if (AutoTradingOn() && TradingPermitted() && !g_paused) OracleOnAll();
    WriteStatus();
    PanelUpdate();   // timer-driven, so it never blanks in a quote pause
@@ -1838,16 +1513,12 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 void OnTick()
 {
-   // fast path (homologated to MT5's OnTick): news state, then rule C - the ATR
-   // spike/window once per closed bar (CheckVolatilitySpike self-guards on
-   // g_lastM1Bar) and the fixed-pips spike intrabar (CheckSpikePipsLive) - then
-   // manage basket TPs and the basket stop tick-by-tick.
+ // fast path: news state (tracking only), then manage basket TPs and the basket
+ // stop tick-by-tick.
    EvaluateNewsState();
-   CheckVolatilitySpike();
-   CheckSpikePipsLive();
    if (AutoTradingOn() && TradingPermitted() && !g_paused && g_oracleOn)
    {
-      if (Oracle_EngineA) OracleOnEngine(MAGIC_A);
-      if (Oracle_EngineB) OracleOnEngine(MAGIC_B);
+      if (Engine_A_Sell) OracleOnEngine(MAGIC_A);
+      if (Engine_B_Buy) OracleOnEngine(MAGIC_B);
    }
 }

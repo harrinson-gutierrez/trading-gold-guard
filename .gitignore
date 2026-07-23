@@ -6,12 +6,10 @@ docs/
 ff_calendar_sample.json
 .claude/
 *.ex4
-*.ex5
 /compare-panel
 .playwright-mcp
 
 # config/: publish the shareable trading config only.
 # INSTALL.md and the chart profiles carry account numbers and data-folder paths.
 config/*
-!config/symbol_presets.txt
 !config/Cerberus_XAUUSDm.set

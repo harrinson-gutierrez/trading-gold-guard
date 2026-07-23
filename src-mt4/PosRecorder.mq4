@@ -1,8 +1,8 @@
 //+------------------------------------------------------------------+
 //| PosRecorder MT4 - read-only 1 Hz snapshot of every open order.    |
-//| MT4 twin of src-mt5\PosRecorder.mq5: same columns, same delimiter |
-//| and the same flat-account heartbeat, so both captures drop into   |
-//| one comparison without any per-platform special-casing.           |
+//| Writes a ;-separated CSV, one line per position per sample, plus a |
+//| flat-account heartbeat so the analysis can tell "no positions"     |
+//| apart from "no data".                                              |
 //|                                                                   |
 //| Read-only by design: it never opens, modifies or closes anything. |
 //| Here it watches Oracle 2.0 (magics 7799 / 9977), which is a third |

@@ -1,9 +1,9 @@
 # Compiles the MQL4 EAs (src-mt4/*.mq4) and installs them into the production
 # MT4 terminal. Usage: powershell -ExecutionPolicy Bypass -File build.ps1
 #
-# Production: MetaTrader 4 EXNESS (demo account 73114636). Compiles DIRECTLY in
+# Production: MetaTrader 4 EXNESS (demo account 73114764). Compiles DIRECTLY in
 # the terminal data folder with its MetaEditor (works with the terminal open;
-# restart the terminal to load the new .ex4). Twin of build-mt5.ps1.
+# restart the terminal to load the new .ex4).
 
 $Install = "C:\Program Files (x86)\MetaTrader 4 EXNESS"
 $Data    = "$env:APPDATA\MetaQuotes\Terminal\2191F4A3D14D7B4B1EBB84F924777883"

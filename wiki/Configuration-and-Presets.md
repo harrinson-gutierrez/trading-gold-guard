@@ -1,117 +1,91 @@
-# Configuration and presets
+# Configuration
 
-Cerberus has **three configuration layers**, each overriding the previous one. Knowing
-which layer is winning is the difference between "the EA ignores my settings" and
-"I edited the seed, not the live value".
+Cerberus has **two configuration layers**, the hot one overriding the seed. Knowing which is
+winning is the difference between "the EA ignores my settings" and "I edited the seed, not
+the live value".
 
 ```
-1. EA inputs           .chr chart file / .set file        seed only, read at OnInit
-2. Hot overrides       SET / BSTOP / EMAGATE / SYMBOL     GlobalVariables, survive restarts
-3. Presets             PRESET <sym>                       file on disk, applied as overrides
+1. EA inputs        .chr chart file / .set file     seed only, read at OnInit
+2. Hot overrides    SET / BSTOP                      GlobalVariables, survive restarts
 ```
 
-The inputs in the `.chr` are **only the seed**. Once an override or preset is applied it
-wins until cleared — deleting the `CB_ov*` GlobalVariables, or setting the input value
-again. The internal accessors (`EffTP()`, `EffGrid()`, `EffLot()`, `EffFactor()`,
-`EffMaxLev()`, `EffBstop()`) always resolve the layers in that order, so no code path can
-accidentally read the seed.
+The inputs in the `.chr` are **only the seed**. Once an override is applied it wins until
+cleared — deleting the `CB4_ov*` GlobalVariables, or setting the input value again. The
+internal accessors (`EffTP()`, `EffGrid()`, `EffLot()`, `EffFactor()`, `EffMaxLev()`,
+`EffBstop()`) always resolve seed-then-override, so no code path can accidentally read the
+seed.
 
 **Where to see what is actually live:** `ng_status.json` → `config:{}`, or the chart panel.
 Never assume from the `.chr`.
 
 ```json
-"config":{"symbol":"XAUUSDm","tp":15,"grid":30,"lot":0.01,"factor":1.00,"maxlev":0}
+"config":{"symbol":"XAUUSDm","tp":15,"grid":100,"lot":0.01,"maxlev":0}
 ```
 
-## Preset file
+## The MAIN inputs
 
-`MQL5\Files\symbol_presets.txt` (MT4: `MQL4\Files\`). Plain text, hand-editable, one line
-per symbol:
+The ten inputs that get tuned live sit at the top of the file under `======== MAIN ========`.
+Everything else is grouped behind `SIGNAL` / `NEWS` / `DISPLAY ONLY` / `ADVANCED`
+separators. Input labels read like the variable name, in English.
 
-```
-SYMBOL=TP,GRID,LOT,FACTOR,MAXLEV[,BSTOP]
-```
+| Input | Production | Meaning |
+|---|---|---|
+| `Symbol_Traded` | XAUUSDm | Traded symbol |
+| `TakeProfit_Pips` | 15 | Basket TP, pips from the weighted average |
+| `GridStep_Pips` | 100 | Pips against before adding the next level |
+| `Lot_Fixed` | 0.01 | Fixed lot per level |
+| `Lot_Factor` | 1.0 | Additive grid (1.0 = no lot multiplication) |
+| `MaxSpread_Points` | 240 | No entry/add above this spread |
+| `MaxGrid_Levels` | 0 | 0 → use the capital-proportional cap |
+| `DailyLoss_USD` | 200 | Rule E: close everything and pause |
+| `BasketStop_USD` | 0 | Optional per-basket stop (0 = off, like Oracle) |
 
-| Field | Meaning |
-|---|---|
-| `TP` | Basket take profit, pips from the weighted average |
-| `GRID` | Pips against before adding the next level |
-| `LOT` | Fixed lot per level |
-| `FACTOR` | Lot multiplier per level (1.00 = additive) |
-| `MAXLEV` | Hard depth cap (0 = use the capital-proportional cap) |
-| `BSTOP` | *optional* — per-symbol basket stop in USD (0 = off) |
+On XAUUSDm a strategy pip is `Point*10` = **$0.01**, so `TP=15` is a 15-cent target and
+`GRID=100` a $1.00 step.
 
-`BSTOP` is the sixth field precisely because it does not generalise: a $20 stop sized for
-ETH baskets is disproportionate for gold's 0.01-lot baskets. Legacy five-field lines leave
-the current basket stop untouched rather than resetting it.
-
-### Commands
+## Hot overrides
 
 | Command | Effect |
 |---|---|
-| `PRESET <sym>` | Load that symbol's line, apply it **and switch the traded symbol** |
-| `SAVEPRESET` | Write the current live config back under the active symbol |
+| `SET TP=15 GRID=100 LOT=0.01 FACTOR=1.0 MAXLEV=0` | Any subset; re-anchors the open basket's TP immediately |
+| `BSTOP <usd>` | Basket stop in USD (0 = off) |
 | `CONFIG` | Log the active config |
 
-`SAVEPRESET` rewrites the file, replacing only the active symbol's line and preserving the
-others.
-
-## Production preset
-
-Identical on both platforms — verified live in the MT4 and MT5 terminals:
-
-```
-XAUUSDm=15,30,0.01,1.00,0,0
-```
-
-15-pip basket TP, 30-pip grid step, 0.01 lots per level, additive, no hard depth cap,
-basket stop off in the file. On XAUUSDm a strategy pip is $0.01, so this is a 15-cent
-target with a 30-cent step.
-
-The basket stop is commonly raised **live** (`BSTOP 30`) without editing the file; the
-GlobalVariable override wins over the file until cleared, which is why the file can read
-`0` while the panel shows `30`.
+Both persist in GlobalVariables and survive a restart. The basket stop is commonly raised
+**live** (`BSTOP 40`) without editing the `.chr`; the override wins over the seed until
+cleared, which is why the `.chr` can read `0` while the panel shows `40`.
 
 ## Input set file
 
-`config/Cerberus_XAUUSDm.set` is the full production input set, loadable from MetaEditor
-or the Strategy Tester's *Load* button on either platform. Deviations from the compiled
-defaults:
-
-| Input | Compiled default | Production `.set` | Reason |
-|---|---|---|---|
-| `Oracle_TakeProfit` | 20 | **15** | Tighter cycle measured on gold |
-| `Oracle_GridSize` | 50 | **30** | Matches the 15-pip TP spacing |
-| `Oracle_NewBasketNeedsEMA` | false | **true** | Without it: 26 baskets/21 min vs Oracle 2.0's 11 |
-| `Oracle_DollarsPerLevel` | 180 | **0** | Proportional cap disabled while the lot sits at the 0.01 floor |
-| `UseHourFilter` | true | **false** | The soak measures the engine unfiltered |
-
-Everything else matches the source defaults documented in
-[Guardian rules](Guardian) and [ORACLE engine](Oracle-Engine).
+`config/Cerberus_XAUUSDm.set` is the full production input set, loadable from MetaEditor's
+*Load* button. It carries the compiled defaults, which **are** the production config
+(`TP=15 / GRID=100 / BSTOP=0`, fade, one basket per HiLo flip). There are no deviations to
+list in v2.0 — the defaults are the deployed config.
 
 ## Editing inputs without the GUI
 
-The chart file `MQL5\Profiles\Charts\Default\chartNN.chr` is **UTF-16** and must be edited
-with the terminal **closed** — the terminal rewrites it on exit, discarding your changes
-otherwise.
+The chart file `MQL4\Profiles\Default\chart01.CHR` must be edited with the terminal
+**closed** — the terminal rewrites it on exit, discarding your changes otherwise.
 
-The `<expert>` block sits in the chart header right after `windows_total=1`, and needs:
+The `<expert>` block sits near the end of the chart, before `</chart>`:
 
 ```
-expertmode=5     ; live trading + DLL imports
+<expert>
+name=Cerberus
+flags=343      ; live trading + DLL imports enabled
+window_num=0
+<inputs>
+...
+</inputs>
+</expert>
 ```
 
-Cerberus writes `.bak`, `.bak2`, … backups when inputs are edited. Keep them: a `.chr`
-saved without its `<expert>` block means the EA silently does not load and the panel
-disappears. See [Operations playbook](Operations-Playbook) for the exact scenario that
-caused this once.
+Because the input **names** changed in v2.0, an old `.chr` from a v1.x build carries stale
+input lines; MT4 ignores unknown inputs and uses the compiled defaults for the rest. The
+clean way to reset to defaults is to empty the `<inputs>` block (terminal closed) — MT4 then
+seeds every input from the binary, which prints them in the `INIT` log line for
+verification.
 
-## Switching symbol
-
-`SYMBOL <sym>` flattens and switches; `PRESET <sym>` does the same **and** applies that
-symbol's stored config. The active symbol persists in `ng_active_symbol.txt` (a string,
-which GlobalVariables cannot store).
-
-> After a switch, Cerberus calls `ChartSetSymbolPeriod`, which is **asynchronous** and
-> queues an EA re-init. Never close or restart the terminal in the seconds right after —
-> see [Operations playbook](Operations-Playbook).
+> Also clear the `CB4_ov*` GlobalVariables when resetting, or a stale hot override
+> (e.g. an old `GRID=90`) will shadow the new default. See
+> [Operations playbook](Operations-Playbook).

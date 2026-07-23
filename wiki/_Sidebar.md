@@ -1,4 +1,4 @@
-**Cerberus**
+**Cerberus** (MT4, v2.0)
 
 - [Home](Home)
 - [Architecture](Architecture)
@@ -6,7 +6,7 @@
 **Behaviour**
 - [Guardian rules](Guardian)
 - [ORACLE engine](Oracle-Engine)
-- [Configuration & presets](Configuration-and-Presets)
+- [Configuration](Configuration-and-Presets)
 - [Command channel](Commands)
 
 **Running it**
@@ -15,5 +15,4 @@
 - [Tools & panels](Tools-and-Panels)
 
 **Reference**
-- [MT4 vs MT5](MT4-vs-MT5)
 - [Safety model](Safety-Model)

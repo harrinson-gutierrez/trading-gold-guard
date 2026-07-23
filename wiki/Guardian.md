@@ -1,147 +1,110 @@
 # Guardian rules
 
 The guardian is the always-on head. It evaluates on **every tick and every 5-second
-timer**, and it acts on **every position in the terminal**, not just the ones ORACLE
-opened — that is how it polices other EAs running on the same account.
+timer**, and it acts on **every position in the terminal**, not just the ones ORACLE opened
+— that is how it polices other EAs on the same account.
 
-Every rule below exists because a specific loss happened. None of them are theoretical.
+v2.0 stripped the guardian to the two nets the owner kept on purpose. Everything that closed
+a position *early* was removed, because realising a loss breaks the average the shared
+basket TP depends on — the mechanism that pushed the average loss to −$3.58 against Oracle's
+−$1.78 while winning *more* often.
 
 ## Connection guard (before anything else)
 
 ```
-if (!TERMINAL_CONNECTED || equity <= 0 || balance <= 0) return;
+if (!IsConnected() || balance <= 0) return;
 ```
 
 After a restart or a broker disconnect, account values arrive as `0`. Without this guard,
-rule E would read a "loss" the size of its own baseline and pause the system on a false
-positive — measured, then fixed.
+rule E would read a "loss" the size of its own baseline and pause on a false positive.
 
-## Rule A — adverse pips per position
+## Rule E — daily loss (kept)
 
-`MaxAdversePips = 300`, floored by `RuleA_xATR = 15 × ATR(M1)`.
+`DailyLoss_USD = 200`. When equity is down that much from the day's baseline, close
+**everything** and pause until an explicit `RESUME`.
 
-Closes any position that has moved N pips against its entry. The ATR floor makes the rule
-**per symbol and volatility-relative**: 300 pips on gold is a real $30 move, but on
-BTCUSDm it is a $30 wiggle. The effective limit is
-`max(MaxAdversePips, RuleA_xATR × ATR ÷ pip)`, so a fixed number calibrated for gold never
-misfires on a different instrument.
+The baseline lives in `NG_DayDate` / `NG_DayStartBal`, so it survives restarts. After a demo
+top-up the baseline is stale — send `RESETDAY` to re-anchor it, otherwise the deposit reads
+as a gain and the day's loss budget is wrong.
 
-> Pip scale trap: XAUUSDm quotes with **3 decimals**, so `_Point*10` makes a "pip" $0.01 —
-> ten times tighter than intended. `PipSizeOverride = 0.1` keeps the guardian's pip at
-> $0.10.
+This is the **account-level** net. With the basket stop off (default), it is the *only*
+automatic net, and it only runs while the EA runs.
 
-## Rule B — margin protection
+## Basket stop — optional (kept, default off)
 
-`MinMarginLevelPct = 200`.
+`BasketStop_USD = 0`. When a basket's floating P/L falls below −N USD, cut it, then hold off
+re-arming that engine for `BasketStop_CooldownMin = 30` minutes.
 
-While the margin level is below the threshold, close the **worst** position (P/L + swap),
-recompute, and repeat — capped at 10 iterations per pass so a broken close cannot spin.
-It stops as soon as the level recovers or a close fails.
+`BasketStop_ServerSL = true` mirrors the stop as a **broker-side SL** on every position of
+the basket, sized so the whole basket losing at once approximates `BasketStop_USD`. It
+executes even when our own close orders are being rejected (measured 2026-07-20: the broker
+refused every close retry for ~2 h while the basket kept moving).
 
-## Rule C — volatility circuit breaker (per symbol)
+> ⚠️ **At `BasketStop_USD = 0` the broker-side SL is off too** — it is attached only when
+> the stop is armed. Running with the stop off leaves rule E as the sole net, and rule E
+> does not run if the terminal is off. For any unattended run, set it above zero.
 
-| Input | Default | Trigger |
-|---|---|---|
-| `VolSpikeATRmult` | 5 | One M1 candle larger than 5 × ATR(20) |
-| `VolWindowATRmult` | 8 | A 5-candle (`VolWindowM1Bars`) range larger than 8 × ATR |
-| `VolSpikePips` | 0 (off) | Absolute variant, in fixed pips |
-| `VolPauseMinutes` | 3 | Renewable cooldown after the **last** violent candle |
-| `CloseOnVolSpike` | false | Also close that symbol's basket |
-
-Rule C became **per symbol** in v2.7 after three measured cases where a rollover spike on
-one quiet pair wiped the positions of all six symbols at once. A spike on EURUSD now
-pauses EURUSD and nothing else.
-
-`CloseOnVolSpike` decides the philosophy: `true` cuts at the start of the move, `false`
-only stops adding to it. It currently runs `false`, so the volatility breaker is a brake,
-not a scissor.
-
-## Rule D — USD loss per position
-
-`MaxLossPerTradeUSD = 60`. Closes any single position losing more than N USD, counting
-swap. This is the backstop for the case rule A misses because price gapped rather than
-travelled.
-
-## Rule E — daily loss
-
-`MaxDailyLossUSD = 200`. Closes **everything** and pauses until an explicit `RESUME`.
-
-The baseline is stored in `NG_DayDate` / `NG_DayStartBal`, so it survives restarts. After
-a demo top-up the baseline is stale — send `RESETDAY` to re-anchor it, otherwise the
-deposit reads as a gain and the day's real loss budget is wrong.
-
-## News windows
+## News windows — block new entries only
 
 The guardian fetches the ForexFactory weekly calendar
-(`nfs.faireconomy.media/ff_calendar_thisweek.json`) every `FeedRefreshMinutes` = 60 and
-pauses trading from `MinutesBefore` = 30 to `MinutesAfter` = 30 around every **High**
-impact event touching a watched currency. `ClosePendingOrders` also deletes pendings.
+(`nfs.faireconomy.media/ff_calendar_thisweek.json`) every `News_RefreshMinutes = 60` and,
+from `News_MinutesBefore = 30` to `News_MinutesAfter = 45` around every **High**-impact
+event, **stops opening new baskets**. Open baskets are left alone — this matches Oracle's
+`NewsAction=0` (block, do not close).
+
+**All currencies, not just USD.** Oracle's feed has no country filter; it pauses on any
+High-impact event. Measured 2026-07-23: this week had **0** USD-High events but **11** High
+across CAD/GBP/AUD/EUR (including the ECB), which Oracle respected and the old USD-only
+Cerberus ignored. Gold reacts to every major central bank, so v2.0 watches them all.
 
 Two operational facts:
 
-- The URL must be whitelisted **by hand** in Tools → Options → Expert Advisors. MetaTrader stores that list encrypted, so it cannot be deployed from a file. Without it the fetch fails with error 4014.
-- The feed answers **HTTP 429** after a burst of terminal restarts. The guardian falls back to `ff_cache.json` and recovers on its own — do not restart in bursts to "fix" it. `"feed":"disk cache"` in the status JSON is the expected state after a restart, not an alarm.
+- The URL must be whitelisted **by hand** in Tools → Options → Expert Advisors. MetaTrader
+  stores that list encrypted, so it cannot be deployed from a file. Without it the fetch
+  fails with error 4014.
+- The feed answers **HTTP 429** after a burst of terminal restarts. The guardian falls back
+  to `ff_cache.json` and recovers on its own — `"feed":"disk cache"` after a restart is the
+  expected state, not an alarm.
 
-Currencies are derived from `PairsToWatch`. Keep it in sync with what ORACLE actually
-trades: they drifted apart once, watching five FX pairs while trading ETH.
+`TEST=N` injects a fake event N minutes ahead to verify the block end to end.
 
-## Soft entry gates
+## Display only — never blocks, never closes
 
-These block **new entries** and never close anything.
-
-### Hour filter
-
-`UseHourFilter` + `HourBlockRisk = 3` blocks entries in the VERY HIGH bands of the gold
-risk table (08:00–09:30 and 12:00–15:30 UTC). `HourBlockRisk = 2` also blocks MEDIUM.
-
-### Scheduler
-
-`UseSchedule` (off by default) adds up to four user-defined UTC `HH:MM` windows plus
-per-weekday flags. Two modes:
-
-| `SchedKillAT` | Behaviour |
-|---|---|
-| `false` (soft, default) | Only Cerberus stops opening. Other EAs untouched. |
-| `true` (hard) | On entering a window: close all orders and turn the **global** AutoTrading button off, affecting every EA. Re-enabled on exit. |
-
-Hard mode uses its own `CB_DisabledBySched` flag so it can never be confused with a news
-pause or a manual one.
-
-### Session filter
-
-`UseSessionFilter` asks the broker (`SymbolInfoSessionTrade`) whether the symbol is
-tradable right now, instead of assuming. This matters because FX and metals pause on
-Exness during the **21:00–22:00 GMT rollover**: every order returns retcode 10018, and the
-thin quotes in that window produce spikes that are not real moves.
-
-`PreCloseCloseMin = 5` flattens baskets before a session close.
-`PreCloseWeekendOnly = true` restricts that to the **weekend** close only: research said
-flatten for the weekend gap (a grid hanging 49 hours across it is pure gap risk), while
-the nightly rollover only needs entries blocked. `WeekendGapHours = 6` is what
-distinguishes them, so BTC's daily midnight close is not mistaken for a weekend.
-
-`Oracle_OpenWarmupMin = 15` vetoes entries in the first minutes after a session reopens,
-because thin opening quotes spike the ATR that rule C measures against.
+- **Hour-risk band**: the gold risk table (VERY LOW … VERY HIGH by UTC band) is shown on the
+  panel and published to `ng_status.json` as `hour_risk`, flagged `blocks:false`. In v1.x it
+  gated entries; in v2.0 it is informational. (Measurement showed the basket-stop damage
+  clustered at 02–03 UTC, a band the table calls VERY LOW — the filter was blocking the
+  wrong hours.)
+- **Weekly-close warning**: `Show_SessionWarning` shows `WEEKLY CLOSE SOON` in the last
+  `SessionWarn_Min = 5` minutes before the Friday close (`SessionClose_HourGMT = 21`). It
+  does **not** flatten. The weekend-gap risk it warns about is real and now a manual call:
+  send `CLOSEALL` before the close if you want to be flat.
 
 ## Rejection backoff
 
 | Input | Rejection | Reaction |
 |---|---|---|
-| `SrvBlockBackoffMin = 10` | **Server** says 10026 (AutoTrading disabled by server) | Pause that symbol 10 minutes |
-| `LocalBlockBackoffSec = 10` | **Terminal** says 10027 (this EA not armed yet) | Pause that symbol 10 seconds |
+| `ServerBlock_Min = 10` | **Server** refuses trading (market closed / disabled) | Pause entries 10 minutes |
+| `LocalBlock_Sec = 10` | **Terminal** not armed yet (err 4109/4110/4111) | Pause 10 seconds |
 
 The split matters: the local rejection clears by itself seconds after an init, so spending
-the full server backoff on it would idle the EA for no reason. Before this split, a broker
-block produced thousands of retry attempts per minute.
+the full server backoff on it would idle the EA for no reason.
 
-> On MT4 the local-rejection error is **4109**. If it persists through restarts and
-> `AT_ON`, it is not a backoff problem: the EA's own "Allow live trading" checkbox
-> (F7 → Common) is off, and the journal says *trade operations not allowed by settings*.
+> Persistent **4109** through restarts and `AT_ON` is not a backoff problem: the EA's own
+> "Allow live trading" checkbox (F7 → Common) is off, and the journal says *trade operations
+> not allowed by settings*.
 
-## Commands that touch the guardian
+## Warm-up
 
-`PAUSE`, `RESUME`, `CLOSEALL`, `RESETDAY`, `AT_ON`, `AT_OFF`, `TEST=N` — see
-[Command channel](Commands).
+`OpenWarmup_Min = 3` vetoes entries in the first minutes after a session reopens, because
+thin opening quotes are not real moves.
 
-> **Order of operations:** always close orders **before** turning AutoTrading off. With
-> AT off, close and delete both fail.
+## `AT_OFF` observability
+
+If the global AutoTrading button is off, the strategy is idle. v2.0 makes that loud: the
+status JSON reports `"status":"AT_OFF"` and the log prints one `AT_OFF` line a minute, so a
+button left off by a previous session (the terminal remembers it across restarts) can never
+masquerade as a quiet market.
+
+> **Order of operations:** always close orders **before** turning AutoTrading off. With AT
+> off, close and delete both fail.

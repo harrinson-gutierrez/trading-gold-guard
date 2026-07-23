@@ -1,44 +1,41 @@
 # Architecture
 
 Cerberus is a **single EA on a single chart** with two independent heads. It is not a
-framework: there is one source file per platform, and the heads communicate only through
-shared state (GlobalVariables and the guardian's pause flags).
+framework: one source file, and the heads communicate only through shared state
+(GlobalVariables and the guardian's pause flags).
 
 ## Execution model
 
-Everything runs from two entry points, and both do almost the same work:
+Everything runs from two entry points:
 
 | | `OnTick()` | `OnTimer()` (every 5 s) |
 |---|---|---|
-| Guardian rules A–E | ✅ | ✅ |
-| News / schedule evaluation | ✅ | ✅ |
+| Rule E + basket stop | ✅ | ✅ |
+| News evaluation (tracking) | ✅ | ✅ |
 | ORACLE grid | ✅ | ✅ |
 | Panel refresh | ✅ | ✅ |
-| Command file, feed refresh, volatility window | — | ✅ |
-| Weekend pre-close flatten | — | ✅ |
+| Command file, feed refresh | — | ✅ |
 | `ng_status.json` write | — | every 30 s |
 
-**Why both.** A chart only ticks for its own symbol, so a symbol that Cerberus watches but
-does not host would never be evaluated on ticks alone; the timer covers it. And the panel
-is refreshed from `EventSetTimer`, not from ticks, because during the daily quote pause
-tick-driven panels go blank exactly when you most want to read them.
+**Why both.** The panel is refreshed from `EventSetTimer`, not ticks, because during the
+daily quote pause tick-driven panels go blank exactly when you most want to read them.
 
 The consequence is that the grid can run twice in the same second (a tick burst plus the
-timer) before a fresh order appears in `PositionsTotal`. That is what
-`Oracle_MinSecsBetweenAdds` (default 2 s) exists to prevent: without it a burst stacks
-several levels pips apart and silently violates `GridSize`.
+timer) before a fresh order appears in `OrdersTotal`. That is what `MinSecs_BetweenAdds`
+(default 2 s) prevents: without it a burst stacks several levels pips apart and violates
+`GridStep`.
 
 ## The two heads
 
 ### Guardian
 
-Scope: **every position in the terminal**, whatever magic opened it. This is deliberate —
-it is how the guardian polices foreign EAs. Its powers:
+Scope: **every position in the terminal**, whatever magic opened it — that is how it polices
+foreign EAs. Its powers in v2.0:
 
-- Close individual positions (rules A, B, D) or everything (rule E).
-- Pause a single symbol (rule C) or all trading (news, manual).
+- Close everything (rule E) or cut a single basket (basket stop).
+- Pause all trading (news block, manual pause).
 - Toggle the terminal's **global** AutoTrading button through `user32.dll`
-  (`PostMessageW(WM_COMMAND, 32851)` on MT5, `33020` on MT4).
+  (`PostMessageW(WM_COMMAND, 33020)`).
 
 Details: [Guardian rules](Guardian).
 
@@ -46,11 +43,10 @@ Details: [Guardian rules](Guardian).
 
 Scope: its own two magics only.
 
-| Magic | Role |
+| Magic | Role (both engines on) |
 |---|---|
-| `7799` | Engine A — BUY ladder when both engines are on |
-| `9977` | Engine B — SELL ladder when both engines are on |
-| `777999` | Manual `BUY`/`SELL` commands (guardian testing) |
+| `7799` | Engine A — **SELL** ladder |
+| `9977` | Engine B — **BUY** ladder |
 
 Details: [ORACLE engine](Oracle-Engine).
 
@@ -62,17 +58,14 @@ because loading new EA code requires restarting the terminal.
 | GlobalVariable | Meaning |
 |---|---|
 | `NG_ManualPause` | Manual `PAUSE` is active — only `RESUME` clears it |
-| `NG_DisabledByGuard` | The guardian turned AutoTrading off (news / rule E) |
-| `CB_DisabledBySched` | The **scheduler** turned it off — a separate flag so news and schedule never fight over the button |
+| `NG_DisabledByGuard` | Legacy news lock (cleared on init in v2.0; news no longer touches the button) |
 | `NG_DayDate` / `NG_DayStartBal` | Rule E daily baseline (`RESETDAY` re-anchors it) |
-| `CB_OracleOn` | Strategy head enabled (default 1) |
-| `CB_ovTP`, `CB_ovGrid`, `CB_ovLot`, `CB_ovFactor`, `CB_ovMaxLev`, `CB_ovBstop`, `CB_ovEmaGate` | Hot config overrides — see [Configuration](Configuration-and-Presets) |
+| `CB4_OracleOn` | Strategy head enabled (default 1) |
+| `CB4_hiloSide` | Persisted Gann HiLo side, so the fade/cadence state resumes correctly after a restart |
+| `CB4_ovTP`, `CB4_ovGrid`, `CB4_ovLot`, `CB4_ovFactor`, `CB4_ovMaxLev`, `CB4_ovBstop` | Hot `SET`/`BSTOP` overrides |
 
-The `NG_` prefix is legacy (the project was renamed from Spanish *Cerbero* / *NewsGuard*).
-It is kept on purpose: renaming the variables would have orphaned live state mid-soak.
-
-The active **symbol** override is a string, which GlobalVariables cannot hold, so it lives
-in `ng_active_symbol.txt` instead.
+The `NG_` prefix is legacy (the project was renamed from Spanish *Cerbero*). It is kept on
+purpose: renaming the variables would orphan live state mid-soak.
 
 > **Trap:** a stale `NG_ManualPause` survives a move to another machine. If AutoTrading
 > refuses to come up on a fresh VPS, the guardian is re-disabling it every tick from an
@@ -80,7 +73,7 @@ in `ng_active_symbol.txt` instead.
 
 ## Files
 
-All under the terminal's `MQL5\Files\` (MT4: `MQL4\Files\`):
+All under the terminal's `MQL4\Files\`:
 
 | File | Direction | Contents |
 |---|---|---|
@@ -88,22 +81,20 @@ All under the terminal's `MQL5\Files\` (MT4: `MQL4\Files\`):
 | `ng_status.json` | out | Full state every 30 s |
 | `Cerberus_log.csv` | out | `gmt_date;action;detail` |
 | `ff_cache.json` | out | Calendar cache, so a failed fetch is not a blind guardian |
-| `symbol_presets.txt` | both | Per-symbol config presets |
-| `ng_active_symbol.txt` | both | Active traded symbol |
 
 `ng_status.json` is the integration surface: the [compare panel](Tools-and-Panels) and any
 external report read it and never touch the terminal.
 
 ```json
-{"ea":"Cerberus","version":"1.15","status":"RUNNING",
- "config":{"symbol":"XAUUSDm","tp":15,"grid":30,"lot":0.01,"factor":1.0,"maxlev":0},
+{"ea":"Cerberus4","version":"2.00","status":"RUNNING",
+ "hour_risk":{"band":"MEDIUM","level":2,"blocks":false},
+ "config":{"symbol":"XAUUSDm","tp":15,"grid":100,"lot":0.01,"maxlev":0},
  "basket_stop":{"usd":0,"hits_today":0},
- "balance":3836.33,"equity":3836.33,
- "closed_trades":5164,"win_rate_pct":58.8,"realized_pl":-555.59,
- "avg_win":0.43,"avg_loss":-0.88,
+ "balance":1000.60,"equity":1000.60,
+ "closed_trades":1450,"win_rate_pct":66.5,"realized_pl":-1010.87,
+ "avg_win":0.76,"avg_loss":-3.58,
  "heads":{"oracle":"ON","baskets":[]}}
 ```
 
-Note `avg_win` 0.43 against `avg_loss` −0.88 in that real sample: a 58.8 % win rate with a
-0.49 ratio still loses money. This is why the panel reports both — see
-[Safety model](Safety-Model).
+Note `avg_win` 0.76 against `avg_loss` −3.58 in that real sample: a 66.5 % win rate still
+loses money. The panel reports both — see [Safety model](Safety-Model).

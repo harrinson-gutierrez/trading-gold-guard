@@ -1,11 +1,12 @@
 # Trading Gold Guard — Cerberus
 
-Documentation for **Cerberus**, a guarded grid-trading system for MetaTrader 4 and 5.
+Documentation for **Cerberus**, a guarded grid-trading system for **MetaTrader 4**.
 One Expert Advisor runs two heads on a single chart: a **guardian** that defends the
-account against every position in the terminal, and the **ORACLE** strategy that trades it.
+account against every position in the terminal, and the **ORACLE** strategy that trades it —
+a measured replica of the Oracle 2.0 bot.
 
-Both platform builds are kept in lockstep at **v1.15** and share the same inputs, command
-channel and preset file format.
+Current version **v2.0**. From this version the project is **MetaTrader 4 only**; the earlier
+parallel MQL5 build was removed.
 
 > **Demo only.** Nothing in this project touches a real account. See
 > [Safety model](Safety-Model).
@@ -15,14 +16,13 @@ channel and preset file format.
 | Page | What it answers |
 |---|---|
 | [Architecture](Architecture) | How the two heads, magics, timers and state fit together |
-| [Guardian rules](Guardian) | What closes a position, and why each rule exists |
-| [ORACLE engine](Oracle-Engine) | How the grid enters, adds, exits and stops |
-| [Configuration and presets](Configuration-and-Presets) | The three config layers, `.set` files and `symbol_presets.txt` |
-| [Command channel](Commands) | Every hot command, with MT4/MT5 availability |
+| [Guardian rules](Guardian) | What defends the account: rule E + the optional basket stop |
+| [ORACLE engine](Oracle-Engine) | How the grid fades the market, enters, adds, exits and stops |
+| [Configuration](Configuration-and-Presets) | The MAIN inputs, the `.set` file, hot overrides |
+| [Command channel](Commands) | Every hot command |
 | [Build and deploy](Build-and-Deploy) | Compiling, installing, editing inputs without the GUI |
-| [MT4 vs MT5](MT4-vs-MT5) | Parity matrix and the platform-specific gaps |
 | [Operations playbook](Operations-Playbook) | Live traps that already cost money once |
-| [Tools and panels](Tools-and-Panels) | Golden master, live comparator, PosRecorder, compare panel |
+| [Tools and panels](Tools-and-Panels) | Live comparator, PosRecorder, compare panel |
 | [Safety model](Safety-Model) | Rules of engagement, and how results are measured |
 
 ## The system in one screen
@@ -30,29 +30,29 @@ channel and preset file format.
 ```
                       ┌──────────────────────────────────────┐
    ForexFactory ─────► │  GUARDIAN  (always on, all magics)   │
-   calendar JSON       │  news · rules A/B/C/D/E · gates      │
+   calendar JSON       │  news block · rule E · basket stop   │
    (+ disk cache)      └───────────────┬──────────────────────┘
-                                       │ pause / close / block
+                                       │ block new / close-all / cut basket
                       ┌────────────────▼─────────────────────┐
                       │  ORACLE  (magics 7799 / 9977)        │
-   ng_command.txt ───► │  EMA34 + HiLo(3) on M1               │
-   (hot commands)      │  additive grid · shared basket TP    │
+   ng_command.txt ───► │  MA34(EMA,Open) + Gann HiLo(3,EMA)   │
+   (hot commands)      │  FADES the market · one basket/flip  │
                       └───────────────┬──────────────────────┘
                                        │
                         ng_status.json · Cerberus_log.csv
 ```
 
-The guardian is the last line, not the strategy. Every rule in it was added because a
-measured loss demanded it — the reasoning is recorded on each page rather than lost in
-commit messages.
+The guardian is the last line, not the strategy. v2.0 stripped it to the two nets the owner
+kept on purpose — the daily-loss stop and an optional per-basket stop — because every rule
+that closed a position *early* was realising losses the shared basket TP would have
+recovered.
 
 ## Repository
 
 | Path | Contents |
 |---|---|
-| `src-mt5/` | `Cerberus.mq5` (3 100 lines), `PosRecorder.mq5` |
-| `src-mt4/` | `Cerberus.mq4` (1 800 lines), `PosRecorder.mq4` |
-| `config/` | Production `.set`, `symbol_presets.txt`, chart profiles, install notes |
-| `tools/` | Golden-master and live engine comparators |
+| `src-mt4/` | `Cerberus.mq4` (~1 500 lines), `PosRecorder.mq4` |
+| `config/` | Production `.set`, chart profiles, install notes |
+| `tools/` | Live engine comparator |
 | `compare-panel/` | Read-only multi-account web panel |
 | `docs/` | Design specs and experiment write-ups |
