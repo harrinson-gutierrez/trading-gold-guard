@@ -804,6 +804,25 @@ void OracleOnEngine(int magic)
 
    if (!IsConnected() || AccountEquity() <= 0) return;
 
+   // HYBRID exit like Oracle: on top of each order's individual TP (set above),
+   // close the WHOLE basket when its weighted average reaches +TP pips. Individual
+   // TPs handle the quick scalps; this clears a deep ladder at once - measured
+   // 2026-07-23, Oracle closed 3 same-side orders together at the average TP,
+   // booking the winners and the underwater legs in one shot. Only for n>=2 (a
+   // lone order already exits on its own server-side TP).
+   if (n >= 2)
+   {
+      double avgTP = avg + dir * EffTP() * pip;
+      bool avgHit = (dir > 0) ? (bid >= avgTP) : (MarketInfo(sym, MODE_ASK) <= avgTP);
+      if (avgHit)
+      {
+         LogAction("BASKET_TP", StringFormat("%s magic %d: avg %.3f +%.0fp reached, closing %d levels (net %.2f)",
+                   sym, magic, avg, EffTP(), n, pl));
+         CloseBasket(sym, magic, "basket avg TP");
+         return;
+      }
+   }
+
  // Basket stop BEFORE soft blocks (a blocked hour must not delay the cut)
    if (n > 0 && EffBstop() > 0 && pl <= -EffBstop())
    {
