@@ -601,6 +601,12 @@ void Basket(string sym, int magic, int &n, int &dir, double &lots, double &avg, 
    if (n > 0) last = (dir > 0) ? loPrice : hiPrice;
 }
 
+// Set each order's take profit INDIVIDUALLY at its own open price + TP pips, the
+// way Oracle 2.0 does (measured live 2026-07-23): every order is an independent
+// scalp that closes on a TP-pip move in its own favour, so in an oscillating
+// market many close for small wins instead of the whole basket waiting on the
+// weighted-average TP. The server-side SL below stays BASKET-level (a backstop for
+// the whole ladder, only armed when BasketStop_USD>0).
 void SetBasketTP(string sym, int magic)
 {
    int n, dir; double lots, avg, pl, last; datetime lt;
@@ -608,7 +614,6 @@ void SetBasketTP(string sym, int magic)
    if (n == 0) return;
    int digits = (int)MarketInfo(sym, MODE_DIGITS);
    double point = MarketInfo(sym, MODE_POINT);
-   double tp = NormalizeDouble(avg + dir * EffTP() * StratPip(sym), digits);
 
  // Server-side SL backstop, sized so the WHOLE basket losing at once
  // approximates the basket stop: distance = BasketStopUSD / (lots * $-per-
@@ -643,6 +648,8 @@ void SetBasketTP(string sym, int magic)
    {
       if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if (OrderSymbol() != sym || OrderMagicNumber() != magic || OrderType() > OP_SELL) continue;
+      // INDIVIDUAL TP: TP pips from THIS order's own open price, not the basket avg.
+      double tp = NormalizeDouble(OrderOpenPrice() + dir * EffTP() * StratPip(sym), digits);
  // Staleness threshold: pip*0.1 (=0.01 on gold), not
  // point/2 (=0.0005). Prevents re-modifying the TP/SL on sub-pip drift, so
  // MT4 sends far fewer OrderModify calls (was ~20x more than needed).
