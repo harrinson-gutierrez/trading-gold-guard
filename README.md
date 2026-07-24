@@ -96,6 +96,12 @@ A faithful replica of the Oracle 2.0 bot — measured live, not guessed.
 - **Grid**: on an adverse move of `GridStep_Pips` it adds a level at **constant lot**
   (`Lot_Factor = 1.0` — additive, *not* martingale ×2; confirmed by Oracle opening every
   level at 0.01).
+- **Trend brake**: `TrendBrake_MaxDistPips` (default **150**). While price is more than N pips
+  from the MA34 — a strong directional move — **no new basket and no adds** open (the book is
+  only allowed to run and close). Fading a runaway trend is what buries a grid; Oracle stays
+  quiet in that regime (~1 open/min) while Cerberus was opening 2–6/min into the same move.
+  Measured live: with the brake on, Cerberus matched Oracle at 20 vs 19 opens and depth 3 vs 3
+  over the same window. Visible on the panel and in `ng_status.json` (`trend_brake`).
 - **Exit — hybrid, like Oracle.** Each order has its own individual server-side TP
   (`TakeProfit_Pips` from *its own* open) to book quick scalps; **and** the whole basket
   closes when its total floating equals one TP unit — the weighted average at **+TP / n**

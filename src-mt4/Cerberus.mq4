@@ -59,6 +59,7 @@ input int    MA_Method           = 1;      // MA Method (1 = EMA, else SMA)
 input int    MA_AppliedPrice     = 1;      // MA Applied Price (0=Close 1=Open) - Oracle uses Open
 input int    HiLo_Period         = 3;      // HiLo Period
 input int    HiLo_Method         = 1;      // HiLo Method (1 = EMA, else SMA) - Oracle uses EMA
+input int    TrendBrake_MaxDistPips = 150; // Trend brake: block NEW entries AND adds while price is more than N pips from the MA (a strong directional move). 0 = off. Fading a runaway trend is what buries the basket; Oracle stays quiet, opening ~1/min while Cerberus was opening 2-6/min into the same move.
 
 input string __NEWS__            = "======== NEWS (blocks entries only) ========";
 input int    News_MinutesBefore  = 30;     // News Minutes Before event
@@ -730,6 +731,18 @@ int SignalTF()  { return (Signal_TF > 0) ? Signal_TF : PERIOD_M1; }
 // "close", so this port filtered on a different price than Oracle for days.
 int MaPrice() { return (MA_AppliedPrice == 1) ? PRICE_OPEN : PRICE_CLOSE; }
 
+// Trend brake: true while price is more than TrendBrake_MaxDistPips from the MA(34),
+// i.e. running directionally. Blocks NEW entries and adds (never closes) so Cerberus
+// stops fading a runaway trend - Oracle stays quiet in exactly this case.
+bool TrendBrakeBlocked(string sym, double pip)
+{
+   if (TrendBrake_MaxDistPips <= 0 || pip <= 0) return false;
+   int method = (MA_Method == 1) ? MODE_EMA : MODE_SMA;
+   double ma = iMA(sym, SignalTF(), MA_Period, 0, method, MaPrice(), 0);
+   if (ma == 0) return false;
+   return (MathAbs(MarketInfo(sym, MODE_BID) - ma) / pip > TrendBrake_MaxDistPips);
+}
+
 // Persist the HiLo side so a restart resumes the indicator's real state instead of
 // silently falling back to the MA (see GV_HILO_SIDE). Only writes on a flip.
 int g_prevHiloSide = 0;
@@ -856,6 +869,7 @@ void OracleOnEngine(int magic)
    {
       if (TimeGMT() < g_bstopUntil[EngineIdx(magic)]) return;
       if (!spreadOK) return;
+      if (TrendBrakeBlocked(sym, pip)) return;   // trend brake: do not open into a runaway
       int bias = Bias();
  // One side per engine when both are on, matching Oracle 2.0 as MEASURED:
  // magic 7799 takes SELL and 9977 takes BUY (EngineSide). A lone engine
@@ -903,7 +917,7 @@ void OracleOnEngine(int magic)
    int ei2 = EngineIdx(magic);
    bool addThrottled = (MinSecs_BetweenAdds > 0 &&
                         TimeCurrent() - g_lastAddTime[ei2] < MinSecs_BetweenAdds);
-   if (spreadOK && depthOK && !addThrottled && adverse >= EffGrid() * pip && (lots + nextLot) <= MaxLot_Total)
+   if (spreadOK && depthOK && !addThrottled && !TrendBrakeBlocked(sym, pip) && adverse >= EffGrid() * pip && (lots + nextLot) <= MaxLot_Total)
    {
       if (OpenLevel(sym, magic, dir, n))
       {
@@ -1102,6 +1116,14 @@ void WriteStatus()
                      RiskName(HourRisk(NowMinUTC())), HourRisk(NowMinUTC()));
    s += StringFormat("\"session_warning\":%s,", InSessionWarning() ? "true" : "false");
    s += StringFormat("\"config\":{\"symbol\":\"%s\",\"tp\":%.0f,\"grid\":%.0f,\"lot\":%.2f,\"maxlev\":%d},", g_sym, EffTP(), EffGrid(), EffLot(), EffMaxLev());
+   {
+      double _pip = StratPip(g_sym);
+      double _ma  = iMA(g_sym, SignalTF(), MA_Period, 0, (MA_Method == 1) ? MODE_EMA : MODE_SMA, MaPrice(), 0);
+      double _dist = (_ma > 0 && _pip > 0) ? MathAbs(MarketInfo(g_sym, MODE_BID) - _ma) / _pip : 0;
+      bool _brk = (TrendBrake_MaxDistPips > 0 && _dist > TrendBrake_MaxDistPips);
+      s += StringFormat("\"trend_brake\":{\"max_pips\":%d,\"dist_pips\":%.0f,\"braking\":%s},",
+                        TrendBrake_MaxDistPips, _dist, _brk ? "true" : "false");
+   }
    s += StringFormat("\"basket_stop\":{\"usd\":%.0f,\"hits_today\":%d},", EffBstop(), g_bstopHitsToday);
    s += "\"feed\":\"" + (FeedOk ? "OK" : "disk cache") + "\",";
    s += StringFormat("\"events_loaded\":%d,", g_eventsLoaded);
@@ -1319,6 +1341,20 @@ void PanelUpdate()
       double exposure = 0;
       double pip = StratPip(g_sym);
       double sbid = MarketInfo(g_sym, MODE_BID);
+
+      // Trend brake state - so the freeze is visible on screen
+      {
+         double mab = iMA(g_sym, SignalTF(), MA_Period, 0, (MA_Method == 1) ? MODE_EMA : MODE_SMA, MaPrice(), 0);
+         double distp = (mab > 0 && pip > 0) ? MathAbs(sbid - mab) / pip : 0;
+         bool braking = (TrendBrake_MaxDistPips > 0 && distp > TrendBrake_MaxDistPips);
+         if (TrendBrake_MaxDistPips <= 0)
+            SetLine(line++, "TREND BRAKE: off", cDim);
+         else
+            SetLine(line++, StringFormat("TREND BRAKE: %.0fp from MA / %dp  %s", distp, TrendBrake_MaxDistPips,
+                    braking ? ">> BRAKING: no new / no adds" : "clear"),
+                    braking ? clrTomato : clrLightGreen);
+      }
+
       int engines[2]; engines[0] = MAGIC_A; engines[1] = MAGIC_B;
       for (int e = 0; e < 2; e++)
       {

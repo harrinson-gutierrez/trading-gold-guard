@@ -68,6 +68,18 @@ violated it, 21 levels instead of ~4).
 add several levels in one second before the fresh order appears. The throttle keeps the
 spacing honest.
 
+## Trend brake — don't fade a runaway
+
+`TrendBrake_MaxDistPips = 150`. While the price sits more than N pips from the MA34 — the
+signature of a strong, one-way move — **no new basket arms and no level is added**; the book
+is only allowed to run and close. Fading a sustained trend is the exact regime that buries a
+grid, and it was the last behavioural gap against Oracle: in a directional push Oracle stays
+quiet, opening ~1 basket/min, while Cerberus was opening 2–6/min into the same move and
+piling floating. With the brake on, the two matched live — 20 vs 19 opens and a max depth of
+3 vs 3 over the same window, P/L +$2.40 vs +$2.66. The brake gates entries **and** adds; it
+never closes anything. Its state is on the panel (`TREND BRAKE: Xp from MA / 150p`) and in
+`ng_status.json` (`trend_brake`). `0` disables it.
+
 ## Exit — hybrid, like Oracle
 
 Two exits run together; whichever hits first wins.
@@ -92,6 +104,7 @@ close is evaluated by the EA each tick.
 
 | Input | Default | What it bounds |
 |---|---|---|
+| `TrendBrake_MaxDistPips` | 150 | Block new baskets and adds while price is > N pips from the MA34 (0 = off) |
 | `MaxGrid_Levels` | 0 | Hard cap on levels (0 = use the proportional cap) |
 | `Capital_Base` | 1000 | **Declared** capital for the proportional cap |
 | `Capital_PerLevel` | 180 | One level per N dollars of declared capital |

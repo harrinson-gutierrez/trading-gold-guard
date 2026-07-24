@@ -64,6 +64,7 @@ Cerberus draws its own chart panel, refreshed from `EventSetTimer` rather than f
 a tick-driven panel goes blank during the daily quote pause, which is exactly when you want
 to read it.
 
-The panel shows the active config, the open baskets, each engine's fade side and whether it
-is waiting for its side, the informational hour-risk band, and the last action.
+The panel shows the active config, the trend-brake state (`TREND BRAKE: Xp from MA / 150p`,
+red while braking), the open baskets, each engine's fade side and whether it is waiting for
+its side, the informational hour-risk band, and the last action.
 `PANELDUMP` writes every line to `panel_dump.txt` so it can be read without a screenshot.

@@ -15,6 +15,7 @@ MA_Method=1
 MA_AppliedPrice=1
 HiLo_Period=3
 HiLo_Method=1
+TrendBrake_MaxDistPips=150
 __NEWS__========= NEWS (blocks entries only) ========
 News_MinutesBefore=30
 News_MinutesAfter=45
