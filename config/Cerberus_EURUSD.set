@@ -1,0 +1,42 @@
+__MAIN__========= MAIN ========
+Symbol_Traded=EURUSD
+TakeProfit_Pips=15
+GridStep_Pips=25
+Lot_Fixed=0.01
+Lot_Factor=1.0
+MaxSpread_Points=20
+MaxGrid_Levels=4
+DailyLoss_USD=15
+BasketStop_USD=6
+__SIGNAL__========= SIGNAL ========
+Signal_TF=1
+MA_Period=34
+MA_Method=1
+MA_AppliedPrice=1
+HiLo_Period=3
+HiLo_Method=1
+TrendBrake_MaxDistPips=50
+__NEWS__========= NEWS (blocks entries only) ========
+News_MinutesBefore=30
+News_MinutesAfter=45
+News_RefreshMinutes=60
+News_TestMinutes=
+__DISPLAY__========= DISPLAY ONLY (never blocks) ========
+Show_HourRisk=true
+Show_SessionWarning=true
+SessionClose_HourGMT=21
+SessionWarn_Min=5
+__ADVANCED__========= ADVANCED ========
+Engine_A_Sell=true
+Engine_B_Buy=true
+MaxLot_Total=99.0
+MinSecs_BetweenAdds=2
+BasketStop_CooldownMin=30
+BasketStop_ServerSL=true
+Capital_Base=100
+Capital_PerLevel=25
+OpenWarmup_Min=3
+ServerBlock_Min=10
+LocalBlock_Sec=10
+ClosePendingOrders=true
+Log_FileName=Cerberus_log.csv
