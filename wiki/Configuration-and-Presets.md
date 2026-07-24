@@ -59,7 +59,7 @@ cleared, which is why the `.chr` can read `0` while the panel shows `40`.
 
 `config/Cerberus_XAUUSDm.set` is the full production input set, loadable from MetaEditor's
 *Load* button. It carries the compiled defaults, which **are** the production config
-(`TP=15 / GRID=100 / BSTOP=0`, fade, one basket per HiLo flip). There are no deviations to
+(`TP=15 / GRID=100 / BSTOP=0`, fade, re-arm immediate, one side, hybrid TP/n exit). There are no deviations to
 list in v2.0 — the defaults are the deployed config.
 
 ## Editing inputs without the GUI

@@ -12,7 +12,8 @@ the two agree.
 `tools/engine_live_compare.py` diffs the two engines from the snapshots written by
 PosRecorder: entries, sides, pip step between grid levels, depth per magic, cycle duration,
 distance at which the basket TP is taken. This is how the v2.0 findings were established —
-that Oracle fades the market, that its cadence is governed by the HiLo flip, that it opens
+that Oracle fades the market, that it re-arms immediately after a close, that it keeps a lean
+one-side book by closing baskets at avg + TP/n, that it opens
 every level at a constant 0.01 lot.
 
 Live comparison beats the tester here for a simple reason: the guardian's dependencies
@@ -64,5 +65,5 @@ a tick-driven panel goes blank during the daily quote pause, which is exactly wh
 to read it.
 
 The panel shows the active config, the open baskets, each engine's fade side and whether it
-is waiting for a HiLo flip, the informational hour-risk band, and the last action.
+is waiting for its side, the informational hour-risk band, and the last action.
 `PANELDUMP` writes every line to `panel_dump.txt` so it can be read without a screenshot.

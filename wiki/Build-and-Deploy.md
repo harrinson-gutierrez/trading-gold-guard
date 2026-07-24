@@ -35,7 +35,7 @@ are separate steps. Compare:
 
 If they differ, the terminal is still running an older `.ex4` and needs a restart. The
 `INIT` log line also prints the effective config, so a redeploy is verified by reading it —
-e.g. `ENTRY=FADE ... GRID=100 ... new basket on HiLo flip`.
+e.g. `ENTRY=FADE ... GRID=100 ... re-arm immediate`.
 
 ## Terminal setup (once per terminal)
 

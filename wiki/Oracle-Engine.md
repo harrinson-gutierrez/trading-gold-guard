@@ -24,7 +24,7 @@ too.
 > The indicator is not miscalculated — the error was conceptual. The HiLo computes the trend
 > side correctly; Oracle simply *fades* it instead of following it.
 
-## Two engines, one ladder per side
+## Two engines, one side at a time
 
 | Magic | Side (both engines on) |
 |---|---|
@@ -33,19 +33,20 @@ too.
 
 As measured on Oracle (the reverse of its own cosmetic "Engine A [BUY]" labels). With the
 fade, a falling market makes the fade side BUY, so the BUY engine (9977) arms; a rising
-market arms the SELL engine (7799). `Engine_A_Sell` / `Engine_B_Buy` toggle them.
+market arms the SELL engine (7799).
 
-## Cadence — one new basket per HiLo flip
+**Never both sides at once.** Before an engine arms a fresh basket, any basket the *other*
+engine still holds is closed (`FLIP_CLOSE`). A fade flip leaves the book on one side only.
+Without this, Cerberus carried a hedged SELL+BUY dead weight — measured 2026-07-24: a 3-level
+SELL and a 2-level BUY open at the same time, floating −$5 that never cleared, while Oracle
+held a single 1-level basket.
 
-A closed basket does **not** re-arm every tick the side is still valid. It waits for the raw
-HiLo to **flip** (a fresh signal edge): each contiguous stretch of one HiLo side is an
-"epoch", and an engine may arm at most one new basket per epoch.
+## Cadence — re-arm immediately
 
-This is Oracle's real cadence governor. Before it, the HiLo persisting a side forever made
-Cerberus re-arm the second it closed a basket — measured ~22 baskets/10 min. With the flip
-gate, that dropped to ~3, against Oracle's ~5 in the same window. (Oracle's own
-`InpOpenOneCandle` was turned off during the test, confirming the flip — not a per-candle cap
-— is what governs its rhythm.)
+A closed basket opens the next one on the following tick, as long as the fade side is valid —
+exactly like Oracle, which books its many small wins by re-arming at once. A HiLo-flip gate
+was tried and removed: it waited for a fresh signal edge before re-arming, which starved the
+win-booking to ~28 basket cycles against Oracle's ~72 in a comparable window.
 
 ## The grid
 
@@ -67,12 +68,25 @@ violated it, 21 levels instead of ~4).
 add several levels in one second before the fresh order appears. The throttle keeps the
 spacing honest.
 
-## Exit
+## Exit — hybrid, like Oracle
 
-One **shared, server-side take profit** on every order of the basket, `TakeProfit_Pips` from
-the volume-weighted average, re-anchored to the new average on every add. The whole ladder
-closes at once. Because the TP lives on the broker, it survives a terminal crash, and it is
-re-anchored live when you change `TP` with a `SET` command.
+Two exits run together; whichever hits first wins.
+
+1. **Individual TP per order.** Each order carries its own server-side TP at `TakeProfit_Pips`
+   from *its own* open price. Shallow orders scalp their +15 pips and close independently.
+2. **Basket-average close at avg + TP / n.** The whole basket closes when its **total**
+   floating equals one TP unit — i.e. the volume-weighted average is `TakeProfit_Pips ÷ n`
+   pips in profit, **not** the full `TakeProfit_Pips`. A deep 5-level ladder therefore clears
+   on a 3-pip bounce, not an unreachable 15.
+
+The second point is the one that keeps the book lean. Measured 2026-07-24: Oracle cleared a
+6-level basket at avg + 3.3 pips and a 3-level one at avg + 13.7 — both about one TP unit of
+*total* profit, regardless of depth. Before this fix Cerberus closed the basket at avg + full
+TP, so a deep ladder never reached its own target and floating piled to −$16.54; with `TP / n`
+it fell to −$1.70, matching Oracle's lean book.
+
+The individual TPs live on the broker, so they survive a terminal crash; the basket-average
+close is evaluated by the EA each tick.
 
 ## Risk net
 

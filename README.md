@@ -86,18 +86,22 @@ A faithful replica of the Oracle 2.0 bot — measured live, not guessed.
   the entry is the **opposite** of it (falling market → BUY, rising → SELL). MA(34, EMA on
   the **Open**) is the tie-breaker before the HiLo has a side. Verified side-by-side against
   the real Oracle, which trades the same way with `InpHILOFilterInverter=false`.
-- **Two engines**: with both on, magic **7799 takes the SELL** side and **9977 the BUY**
-  side — one ladder per side, as measured on Oracle (the reverse of its own cosmetic
-  labels).
-- **Cadence — one new basket per HiLo flip.** A closed basket does **not** re-arm every
-  tick the side is still valid; it waits for the HiLo to flip (a fresh signal edge). This is
-  Oracle's real cadence governor: measured, it cut re-arming from ~22 baskets/10 min to ~3,
-  matching Oracle's ~5.
+- **Two engines, one side at a time**: magic **7799 takes the SELL** side and **9977 the
+  BUY** side (the reverse of Oracle's own cosmetic labels). Before a fresh basket arms, any
+  basket the *other* engine still holds is closed, so a fade flip leaves the book on **one
+  side only** — no hedged SELL+BUY dead weight.
+- **Cadence — re-arm immediately**, like Oracle: as long as the fade side is valid, a closed
+  basket opens the next on the following tick. (A HiLo-flip gate was tried and removed — it
+  starved the win-booking to ~28 basket cycles against Oracle's ~72.)
 - **Grid**: on an adverse move of `GridStep_Pips` it adds a level at **constant lot**
   (`Lot_Factor = 1.0` — additive, *not* martingale ×2; confirmed by Oracle opening every
   level at 0.01).
-- **Exit**: one shared server-side TP for the whole basket, `TakeProfit_Pips` from the
-  weighted average, re-anchored on every add.
+- **Exit — hybrid, like Oracle.** Each order has its own individual server-side TP
+  (`TakeProfit_Pips` from *its own* open) to book quick scalps; **and** the whole basket
+  closes when its total floating equals one TP unit — the weighted average at **+TP / n**
+  pips, not +TP. A deep 5-level ladder therefore clears on a 3-pip bounce instead of an
+  unreachable 15, which is what keeps the book lean (measured: floating fell from −$16.54 to
+  −$1.70, matching Oracle). Whichever exit hits first.
 - **Depth cap**: `MaxGrid_Levels`, or a capital-proportional cap
   (`Capital_Base` / `Capital_PerLevel`) so the risk scales with the declared balance.
 - **Basket stop**: `BasketStop_USD` (default 0). ⚠️ **At 0 the broker-side SL is off too** —

@@ -36,7 +36,7 @@ parallel MQL5 build was removed.
                       ┌────────────────▼─────────────────────┐
                       │  ORACLE  (magics 7799 / 9977)        │
    ng_command.txt ───► │  MA34(EMA,Open) + Gann HiLo(3,EMA)   │
-   (hot commands)      │  FADES the market · one basket/flip  │
+   (hot commands)      │  FADES the market · one side · TP/n   │
                       └───────────────┬──────────────────────┘
                                        │
                         ng_status.json · Cerberus_log.csv
