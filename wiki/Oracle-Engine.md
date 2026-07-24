@@ -70,15 +70,23 @@ spacing honest.
 
 ## Trend brake — don't fade a runaway
 
-`TrendBrake_MaxDistPips = 150`. While the price sits more than N pips from the MA34 — the
+`TrendBrake_MaxDistPips = 120` (≈ $12 on XAUUSD). While the price sits more than N pips from the MA34 — the
 signature of a strong, one-way move — **no new basket arms and no level is added**; the book
 is only allowed to run and close. Fading a sustained trend is the exact regime that buries a
 grid, and it was the last behavioural gap against Oracle: in a directional push Oracle stays
 quiet, opening ~1 basket/min, while Cerberus was opening 2–6/min into the same move and
 piling floating. With the brake on, the two matched live — 20 vs 19 opens and a max depth of
 3 vs 3 over the same window, P/L +$2.40 vs +$2.66. The brake gates entries **and** adds; it
-never closes anything. Its state is on the panel (`TREND BRAKE: Xp from MA / 150p`) and in
+never closes anything. Its state is on the panel (`TREND BRAKE: Xp from MA / 120p`) and in
 `ng_status.json` (`trend_brake`). `0` disables it.
+
+Lowered from 150 to 120 after a gradual −252-pip grind: because the drop unfolded over ~35
+min, the MA34 followed the price down and the distance peaked at only ~160 pips, so a 150
+brake barely engaged. 120 bites earlier on such grinds. A distance brake still can't fully
+control a slow grind (that is what the account-level `BasketStop_USD` is for) — it only slows
+how fast new levels pile in. **After a terminal restart the brake reads an inflated distance
+for 1–2 min while the M1 history reloads and the EMA warms up; it over-blocks (the safe
+direction) and self-corrects — do not mistake it for a fault.**
 
 ## Exit — hybrid, like Oracle
 
@@ -104,7 +112,7 @@ close is evaluated by the EA each tick.
 
 | Input | Default | What it bounds |
 |---|---|---|
-| `TrendBrake_MaxDistPips` | 150 | Block new baskets and adds while price is > N pips from the MA34 (0 = off) |
+| `TrendBrake_MaxDistPips` | 120 | Block new baskets and adds while price is > N pips from the MA34 (0 = off) |
 | `MaxGrid_Levels` | 0 | Hard cap on levels (0 = use the proportional cap) |
 | `Capital_Base` | 1000 | **Declared** capital for the proportional cap |
 | `Capital_PerLevel` | 180 | One level per N dollars of declared capital |

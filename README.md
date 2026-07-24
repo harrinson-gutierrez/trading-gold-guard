@@ -96,7 +96,7 @@ A faithful replica of the Oracle 2.0 bot — measured live, not guessed.
 - **Grid**: on an adverse move of `GridStep_Pips` it adds a level at **constant lot**
   (`Lot_Factor = 1.0` — additive, *not* martingale ×2; confirmed by Oracle opening every
   level at 0.01).
-- **Trend brake**: `TrendBrake_MaxDistPips` (default **150**). While price is more than N pips
+- **Trend brake**: `TrendBrake_MaxDistPips` (default **120**, ≈ $12 on XAUUSD; lowered from 150 so a gradual grind — where the MA follows price down and the distance never spikes — gets braked earlier, not only a fast move). While price is more than N pips
   from the MA34 — a strong directional move — **no new basket and no adds** open (the book is
   only allowed to run and close). Fading a runaway trend is what buries a grid; Oracle stays
   quiet in that regime (~1 open/min) while Cerberus was opening 2–6/min into the same move.

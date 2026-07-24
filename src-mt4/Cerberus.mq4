@@ -59,7 +59,7 @@ input int    MA_Method           = 1;      // MA Method (1 = EMA, else SMA)
 input int    MA_AppliedPrice     = 1;      // MA Applied Price (0=Close 1=Open) - Oracle uses Open
 input int    HiLo_Period         = 3;      // HiLo Period
 input int    HiLo_Method         = 1;      // HiLo Method (1 = EMA, else SMA) - Oracle uses EMA
-input int    TrendBrake_MaxDistPips = 150; // Trend brake: block NEW entries AND adds while price is more than N pips from the MA (a strong directional move). 0 = off. Fading a runaway trend is what buries the basket; Oracle stays quiet, opening ~1/min while Cerberus was opening 2-6/min into the same move.
+input int    TrendBrake_MaxDistPips = 120; // Trend brake: block NEW entries AND adds while price is more than N pips ($0.10 each = $12 at 120) from the MA (a strong directional move). 0 = off. Fading a runaway trend is what buries the basket; Oracle stays quiet, opening ~1/min while Cerberus was opening 2-6/min into the same move. Lowered 150->120 so gradual grinds (where the MA follows the price down) get braked earlier, not just fast spikes.
 
 input string __NEWS__            = "======== NEWS (blocks entries only) ========";
 input int    News_MinutesBefore  = 30;     // News Minutes Before event
