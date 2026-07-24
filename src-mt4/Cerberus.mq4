@@ -48,7 +48,7 @@ input int    GridStep_Pips       = 100;    // Grid Step (pips)
 input double Lot_Fixed           = 0.01;   // Fixed Lot
 input double Lot_Factor          = 1.0;    // Lot Factor (1.0 = additive)
 input int    MaxSpread_Points    = 240;    // Max Spread (points, 0 = off)
-input int    MaxGrid_Levels      = 0;      // Max Grid Levels (0 = use capital-proportional cap)
+input int    MaxGrid_Levels      = 0;      // Max Grid Levels per engine (0 = capital-proportional cap)
 input double DailyLoss_USD       = 200.0;  // Daily Loss -> close all + pause (USD, 0 = off)
 input double BasketStop_USD      = 0;      // Basket Stop (USD, 0 = off)
 
@@ -805,20 +805,22 @@ void OracleOnEngine(int magic)
    if (!IsConnected() || AccountEquity() <= 0) return;
 
    // HYBRID exit like Oracle: on top of each order's individual TP (set above),
-   // close the WHOLE basket when its weighted average reaches +TP pips. Individual
-   // TPs handle the quick scalps; this clears a deep ladder at once - measured
-   // 2026-07-23, Oracle closed 3 same-side orders together at the average TP,
-   // booking the winners and the underwater legs in one shot. Only for n>=2 (a
-   // lone order already exits on its own server-side TP).
+   // close the WHOLE basket when its TOTAL floating equals ONE order's TP worth -
+   // i.e. the average is +(TP / n) pips, NOT +TP. Measured 2026-07-24: Oracle
+   // closed a 6-level basket at avg+3.3 pips and a 3-level one at avg+13.7 pips,
+   // both ~one TP unit of total profit. Dividing by n is what lets a deep ladder
+   // clear on a SMALL bounce (a 5-level basket needs only TP/5 = 3 pips), which is
+   // exactly how Oracle keeps a lean book instead of a sunk +TP ladder that never
+   // clears. Only for n>=2 (a lone order already exits on its own server-side TP).
    if (n >= 2)
    {
-      double avgTP = avg + dir * EffTP() * pip;
+      double avgTP = avg + dir * (EffTP() / (double)n) * pip;
       bool avgHit = (dir > 0) ? (bid >= avgTP) : (MarketInfo(sym, MODE_ASK) <= avgTP);
       if (avgHit)
       {
-         LogAction("BASKET_TP", StringFormat("%s magic %d: avg %.3f +%.0fp reached, closing %d levels (net %.2f)",
-                   sym, magic, avg, EffTP(), n, pl));
-         CloseBasket(sym, magic, "basket avg TP");
+         LogAction("BASKET_TP", StringFormat("%s magic %d: avg %.3f +%.1fp (TP/%d) reached, closing %d levels (net %.2f)",
+                   sym, magic, avg, EffTP() / (double)n, n, n, pl));
+         CloseBasket(sym, magic, "basket avg TP (TP/n)");
          return;
       }
    }
@@ -861,6 +863,24 @@ void OracleOnEngine(int magic)
       int side = 0;
       if (Engine_A_Sell && Engine_B_Buy) side = EngineSide(magic);
       if (bias == 0 || (side != 0 && bias != side)) return;
+
+      // NEVER HOLD BOTH SIDES. Before arming a fresh basket, close any basket the
+      // OTHER engine still holds - a fade flip must leave us on ONE side only, the
+      // way Oracle keeps a lean book instead of a hedged SELL+BUY dead weight that
+      // never clears (measured 2026-07-24: Cerberus carried a 3-level SELL AND a
+      // 2-level BUY at once, floating -$5, while Oracle held one 1-level basket).
+      if (Engine_A_Sell && Engine_B_Buy)
+      {
+         int other = (magic == MAGIC_A) ? MAGIC_B : MAGIC_A;
+         int on, od; double ol, oa, opl, olast; datetime olt;
+         Basket(sym, other, on, od, ol, oa, opl, olast, olt);
+         if (on > 0)
+         {
+            LogAction("FLIP_CLOSE", StringFormat("%s: arming %s, closing opposite engine %d (%d levels, net %.2f)",
+                      sym, (bias > 0 ? "BUY" : "SELL"), other, on, opl));
+            CloseBasket(sym, other, "one side only (fade flip)");
+         }
+      }
 
       // Re-arm immediately after a close, like Oracle: as long as the fade side is
       // valid, a closed basket opens the next one on the following tick. Oracle books
